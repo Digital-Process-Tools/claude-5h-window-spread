@@ -7,9 +7,9 @@
   },
   "license": "Community License",
   "repository": "https://github.com/Digital-Process-Tools/claude-5h-window-spread",
-  "dependencies": {
-    "scheduler@claude-code-scheduler": "*"
-  },
+  "dependencies": [
+    "scheduler@claude-code-scheduler"
+  ],
   "keywords": [
     "claude",
     "claude-code",
