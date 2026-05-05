@@ -163,11 +163,13 @@ The math:
 The algorithm:
 
 1. Take your work blocks
-2. Try every possible ping start (`first_block_start - 5h` through `first_block_start`)
-3. Simulate windows 5h apart from that start
-4. Pick the start that minimizes max work-hours per window
+2. Enumerate ping schedules with 1-5 pings, every consecutive pair ≥5h apart (Anthropic's window-reset rule). Windows can have gaps — your laptop just sits idle between blocks.
+3. Validate each block is fully covered by either a single window or a contiguous run of windows
+4. Pick the schedule that minimizes max work-hours per window, then fewest pings, then prefers round hours (HH:00)
 
-The result: pings spaced exactly 5h apart, aligned so each window absorbs the smallest possible chunk of your day.
+The result: pings placed wherever they help most, possibly with idle gaps. Each work block split as evenly as the 5h granularity allows.
+
+For someone with two shifts (5-10am + 6-10pm), this produces something like `02:30 / 07:30 / 15:00 / 20:00` — gap from 12:30 to 15:00 is dead time, and that's fine.
 
 ---
 
@@ -204,6 +206,36 @@ For everyone else who's been locked out at 11am — keep reading.
 ## Credits
 
 Built on top of [`jshchnz/claude-code-scheduler`](https://github.com/jshchnz/claude-code-scheduler) — generic cross-platform scheduler for `claude -p`. Hat tip to [vdsmon/claude-warmup](https://github.com/vdsmon/claude-warmup) for the original "warmup" idea.
+
+## Development
+
+Pure stdlib Python. No build step, no deps, no virtualenv required.
+
+### Run tests
+
+```bash
+python3 -m unittest tests.test_window_spread
+```
+
+42 tests cover time parsing, block parsing, simulation math, the optimization algorithm, the natural baseline, and the `compute` subcommand end-to-end.
+
+### Pre-push hook
+
+A pre-push hook at `.githooks/pre-push` runs the full test suite before any push. Enable once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Failed tests block the push. Bypass with `git push --no-verify` (discouraged).
+
+### Manual run
+
+```bash
+python3 scripts/window-spread.py compute --blocks "8:30-12:20,14:00-18:00,20:00-23:00"
+```
+
+Outputs JSON. Pipe to `jq` for pretty-printing or to `python3 scripts/window-spread.py install -` to apply via claude-code-scheduler.
 
 ## License
 

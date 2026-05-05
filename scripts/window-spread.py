@@ -170,13 +170,20 @@ def find_optimal(blocks: list[tuple[int, int]], max_pings: int = 5) -> Schedule:
     Optimization (lexicographic):
       1. min max(work_per_window)        — balance cap load
       2. min num_pings                    — fewer pings = simpler, less idle cap
-      3. min round-hour penalty           — prefer HH:00 over HH:30
-      4. min ping_start                   — earlier first ping (deterministic)
+      3. max ping_start (-combo[0])       — later first ping = less idle pre-work
+
+    No round-hour preference — optimal time is optimal time. If 06:23 beats
+    06:00, we pick 06:23.
     """
     first_start = blocks[0][0]
     last_end = max(end for _, end in blocks)
 
-    earliest = first_start - WINDOW_LEN_MIN
+    # Candidates are CLOCK-ALIGNED (multiples of PING_STEP_MIN), so a 30-min
+    # grid always considers round hours regardless of where blocks start.
+    raw_earliest = first_start - WINDOW_LEN_MIN
+    earliest = (raw_earliest // PING_STEP_MIN) * PING_STEP_MIN
+    if earliest > raw_earliest:
+        earliest -= PING_STEP_MIN
     latest = last_end
     candidates = list(range(earliest, latest + 1, PING_STEP_MIN))
 
@@ -194,8 +201,7 @@ def find_optimal(blocks: list[tuple[int, int]], max_pings: int = 5) -> Schedule:
                     overlap = max(0, min(b_end, w_end) - max(b_start, w_start))
                     work[i] += overlap
             max_w = max(work)
-            round_penalty = sum(0 if p % 60 == 0 else 1 for p in combo)
-            key = (max_w, len(windows), round_penalty, -combo[0])
+            key = (max_w, len(windows), -combo[0])
             if best_key is None or key < best_key:
                 best = Schedule(
                     ping_start_min=combo[0],

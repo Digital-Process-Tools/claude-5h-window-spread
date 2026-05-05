@@ -108,11 +108,13 @@ class SimulateTest(unittest.TestCase):
 
 
 class FindOptimalTest(unittest.TestCase):
-    def test_florian_picks_06_00(self):
+    def test_florian_picks_latest_optimal_ping(self):
+        # Florian's day: best ping_start is 06:30 (= 390min) — latest first ping
+        # among schedules with max=200 (3h20). 06:00 also valid but has 30min
+        # more idle in W1 before work starts.
         blocks = [(510, 740), (840, 1080), (1200, 1380)]
         spread = ws.find_optimal(blocks)
-        # Best ping_start should be 6:00 (= 360min) giving max=200 (3h20)
-        self.assertEqual(spread.ping_start_min, 360)
+        self.assertEqual(spread.ping_start_min, 390)
         self.assertEqual(spread.max_work_min, 200)
         self.assertEqual(len(spread.windows), 4)
 
@@ -143,7 +145,7 @@ class ComputeOutputTest(unittest.TestCase):
         with patch("sys.stdout", buf):
             ws.main(argv)
         out = json.loads(buf.getvalue())
-        self.assertEqual(out["spread"]["pings"], ["06:00", "11:00", "16:00", "21:00"])
+        self.assertEqual(out["spread"]["pings"], ["06:30", "11:30", "16:30", "21:30"])
         self.assertEqual(out["spread"]["max_work"], "3h20")
         self.assertEqual(out["natural"]["max_work"], "4h")
         self.assertEqual(out["improvement"]["extra_windows"], 1)
@@ -271,7 +273,7 @@ class ComputeOutputEdgeTest(unittest.TestCase):
         with patch("sys.stdout", buf):
             ws.main(argv)
         out = json.loads(buf.getvalue())
-        self.assertEqual(out["spread"]["pings"], ["06:00", "11:00", "16:00", "21:00"])
+        self.assertEqual(out["spread"]["pings"], ["06:30", "11:30", "16:30", "21:30"])
 
     def test_compute_with_evening_only_splits_5h_block(self):
         argv = ["compute", "--blocks", "20:00-01:00"]
