@@ -1,0 +1,40 @@
+{
+  "name": "claude-5h-window-spread",
+  "description": "Stop Claude Code Pro/Max 5-hour rolling window cap hits and rate-limit lockouts. Skill analyses session usage from transcripts, computes optimal cron pings (claude -p warmup), and spreads work across more 5h windows via claude-code-scheduler. Cross-platform: macOS launchd, Linux cron, Windows Task Scheduler. For heavy users (devs hitting daily limits) on Pro/Max plans. Keywords: 5h limit, 5 hour limit, session limit, rate limit, claude pro plan, claude max plan, window warmup, lockout, rolling window, automation, anthropic.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Digital Process Tools"
+  },
+  "license": "Community License",
+  "repository": "https://github.com/Digital-Process-Tools/claude-5h-window-spread",
+  "dependencies": {
+    "scheduler@claude-code-scheduler": "*"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "5h",
+    "5-hour",
+    "5-hour-limit",
+    "session-limit",
+    "rate-limit",
+    "rolling-window",
+    "window",
+    "cap",
+    "cap-hit",
+    "lockout",
+    "warmup",
+    "spread",
+    "pro",
+    "max",
+    "claude-pro",
+    "claude-max",
+    "schedule",
+    "scheduler",
+    "cron",
+    "pinger",
+    "automation",
+    "productivity"
+  ]
+}

@@ -17,20 +17,22 @@ For devs who hit Claude Pro/Max cap daily. Get up to 33% more cap from the same 
 
 ## The problem
 
-You start work at 8:30. By 11, you're locked out. Two hours of your morning, gone.
+**17:20 on a Tuesday.** 40 minutes before quitting time. You're mid-debug, one fix from done. Cap hits. Locked out. Can't ship the change, can't finish the thread, can't even reply to your colleague's question.
 
-Claude Pro/Max gives you a 5-hour rolling window from your first message. **One window.** Burn through it, and you wait until it expires before sending another message.
+Window resets at 19:00. By then you're at dinner. Tomorrow you'll start over.
 
-Most days, you waste 2-4 hours bumping into the cap.
+Claude Pro/Max gives you a 5-hour rolling window from your first message. **One window.** Cap typically lands ~40 minutes before the window expires when you're working hard. If your afternoon window started at 12:20, it dies at 17:20 — just before you stop. The last hour of your day evaporates.
 
-| Time  | What happens                            |
-| ----- | --------------------------------------- |
-| 08:30 | First message. Window opens 8:30-13:30. |
-| 11:00 | Cap hit. Locked out.                    |
-| 13:30 | Window resets. Lunch's over.            |
-| 14:00 | Real work resumes — 2.5h burned.        |
+| Time  | What happens                                                          |
+| ----- | --------------------------------------------------------------------- |
+| 08:30 | Morning message. W1 opens 8:30-13:30.                                 |
+| 12:20 | Lunch. W1 expires by 13:30 — already past lunch boundary.             |
+| 13:00 | Back at desk. W2 opens whenever you send the first afternoon message. |
+| 17:20 | **Cap hit. Locked out.** 40 min of dense afternoon debug ruined.      |
+| 18:00 | You walk away. Last hour of progress: lost.                           |
+| 19:00 | W2 finally resets. You're not at the keyboard.                        |
 
-This is the average heavy-use dev day on Pro/Max.
+This is the heavy-use dev day on Pro/Max. The lockouts always seem to land at the worst time.
 
 ---
 
