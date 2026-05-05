@@ -630,6 +630,20 @@ class CmdInstallTest(unittest.TestCase):
                 self.assertEqual(ret, 0)
                 self.assertEqual(mock_dispatch.call_args[0][1], ["06:30"])
 
+    def test_cmd_install_calls_uninstall_first(self):
+        # destructive-replace: install must remove existing entries before installing new
+        payload = json.dumps({"spread": {"pings": ["06:30"]}})
+        with patch("sys.stdin", StringIO(payload)):
+            with patch.object(ws, "_dispatch") as mock_dispatch:
+                mock_dispatch.return_value = [{"returncode": 0}]
+                buf = StringIO()
+                with patch("sys.stdout", buf):
+                    ws.main(["install", "-", "--dry-run"])
+                # 2 calls: uninstall (cleanup) then install
+                self.assertEqual(mock_dispatch.call_count, 2)
+                self.assertEqual(mock_dispatch.call_args_list[0][0][0], "uninstall")
+                self.assertEqual(mock_dispatch.call_args_list[1][0][0], "install")
+
     def test_cmd_install_returns_nonzero_on_failure(self):
         payload = json.dumps({"spread": {"pings": ["06:30"]}})
         with patch("sys.stdin", StringIO(payload)):

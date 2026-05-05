@@ -588,7 +588,11 @@ def _dispatch(action: str, *args, **kwargs):
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    """Install pings via the local OS scheduler (launchd / cron / Task Scheduler)."""
+    """Install pings via the local OS scheduler (launchd / cron / Task Scheduler).
+
+    Destructive-replace: removes all existing window-spread entries first to
+    avoid accumulating stale pings when re-running setup with different blocks.
+    """
     if args.path == "-":
         data = json.load(sys.stdin)
     else:
@@ -598,10 +602,15 @@ def cmd_install(args: argparse.Namespace) -> int:
     command = args.command
     weekdays_only = args.weekdays
 
-    results = _dispatch("install", pings, command, weekdays_only, args.dry_run)
-    json.dump({"os": platform.system(), "installed": results}, sys.stdout, indent=2)
+    removed = _dispatch("uninstall", args.dry_run)
+    installed = _dispatch("install", pings, command, weekdays_only, args.dry_run)
+    json.dump(
+        {"os": platform.system(), "removed": removed, "installed": installed},
+        sys.stdout,
+        indent=2,
+    )
     sys.stdout.write("\n")
-    return 0 if all(r.get("returncode", 0) == 0 for r in results) else 1
+    return 0 if all(r.get("returncode", 0) == 0 for r in installed) else 1
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:

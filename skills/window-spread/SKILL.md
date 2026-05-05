@@ -1,6 +1,6 @@
 ---
 name: window-spread
-description: Configure cron pings that spread Claude Pro/Max 5h windows across the user's actual work pattern. Asks work blocks in natural language, runs the optimization script, shows the side-by-side comparison, and installs pings via claude-code-scheduler.
+description: "Configure cron pings that spread Claude Pro/Max 5h windows across the user's actual work pattern. Asks work blocks in natural language, runs the optimization script, shows the side-by-side comparison, and installs pings via the local OS scheduler (launchd/cron/Task Scheduler)."
 ---
 
 ## Lookup Table
@@ -39,13 +39,13 @@ Get the user from "I keep hitting cap" to "I have 4 pings scheduled" in under 90
 
 3. **Confirm what you parsed.** One line. "Got: 8:30-12:20, 14:00-18:00, 20:00-23:00. Run optimization?"
 
-4. **Run the script** via Bash:
+4. **Run the script** via Bash. The script lives at the plugin root:
 
    ```bash
-   python3 scripts/window-spread.py compute --blocks "8:30-12:20,14:00-18:00,20:00-23:00"
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/window-spread.py" compute --blocks "8:30-12:20,14:00-18:00,20:00-23:00"
    ```
 
-   Returns JSON with `spread.pings`, `spread.windows`, `natural.max_work`, `improvement`.
+   `${CLAUDE_PLUGIN_ROOT}` resolves to where Claude Code installed the plugin — works regardless of plugin version. Returns JSON with `spread.pings`, `spread.windows`, `natural.max_work`, `improvement`.
 
 5. **Show the result** as a compact table:
 
@@ -62,13 +62,14 @@ Get the user from "I keep hitting cap" to "I have 4 pings scheduled" in under 90
    Apply?
    ```
 
-6. **On confirm**, run the install subcommand:
+6. **On confirm**, pipe compute output into install:
 
    ```bash
-   python3 scripts/window-spread.py install pings.json --weekdays
+   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/window-spread.py" compute --blocks "..." \
+     | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/window-spread.py" install - --weekdays
    ```
 
-   (Pipe the compute output to a temp file, or `compute ... | install -`.)
+   Install is **destructive-replace**: it removes all existing window-spread entries first, then installs the new ones. Re-running setup with different blocks won't accumulate stale pings.
 
 7. **Confirm done.** "Installed. Next ping fires <next time>. Run `/window-spread status` to verify."
 
