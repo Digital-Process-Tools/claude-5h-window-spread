@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="banner.png" alt="claude-5h-window-spread" width="600">
+  <img src="banner.png" alt="claude-5h-window-spread">
 </p>
 
 # claude-5h-window-spread
