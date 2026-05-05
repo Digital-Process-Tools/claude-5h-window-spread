@@ -292,5 +292,409 @@ class ComputeOutputEdgeTest(unittest.TestCase):
             ws.main(["compute"])
 
 
+# ---------- scheduler installer tests ---------------------------------------
+
+
+class MacOSPlistTest(unittest.TestCase):
+    def test_weekdays_only_has_5_intervals(self):
+        plist = ws._macos_plist(
+            "com.dpt.window-spread.0630",
+            "claude -p hi",
+            6,
+            30,
+            weekdays_only=True,
+        )
+        # 5 entries for Mon-Fri (Weekday 1-5)
+        self.assertEqual(plist.count("<key>Weekday</key>"), 5)
+        for wd in range(1, 6):
+            self.assertIn(f"<integer>{wd}</integer>", plist)
+
+    def test_daily_has_single_calendar_interval(self):
+        plist = ws._macos_plist(
+            "com.dpt.window-spread.0630",
+            "claude -p hi",
+            6,
+            30,
+            weekdays_only=False,
+        )
+        self.assertEqual(plist.count("<key>Weekday</key>"), 0)
+        self.assertEqual(plist.count("<key>Hour</key>"), 1)
+
+    def test_label_in_plist(self):
+        plist = ws._macos_plist("com.dpt.window-spread.0630", "echo hi", 6, 30, False)
+        self.assertIn("<string>com.dpt.window-spread.0630</string>", plist)
+
+    def test_command_via_login_shell(self):
+        plist = ws._macos_plist("com.dpt.window-spread.0630", "claude -p hi", 6, 30, False)
+        self.assertIn("/bin/bash", plist)
+        self.assertIn("-lc", plist)
+        self.assertIn("claude -p hi", plist)
+
+
+class LinuxCronTest(unittest.TestCase):
+    def test_cron_line_weekdays(self):
+        line = ws._cron_line("06:30", "claude -p hi", weekdays_only=True)
+        self.assertIn("30 6 * * 1-5", line)
+        self.assertIn("claude -p hi", line)
+        self.assertIn("# com.dpt.window-spread.0630", line)
+
+    def test_cron_line_daily(self):
+        line = ws._cron_line("06:30", "claude -p hi", weekdays_only=False)
+        self.assertIn("30 6 * * *", line)
+
+    def test_cron_line_minute_padding(self):
+        line = ws._cron_line("06:00", "echo", weekdays_only=False)
+        # 0-padded minute is OK in cron, "0 6 * * *" is valid
+        self.assertTrue(line.startswith("0 6 ") or line.startswith("00 6 "))
+
+    def test_install_linux_preserves_existing_entries(self):
+        # crontab has user's own jobs + a stale window-spread entry
+        existing = [
+            "# user's own job",
+            "0 9 * * 1 /home/user/backup.sh",
+            "30 10 * * * claude -p hi # com.dpt.window-spread.1030",  # stale
+        ]
+        with patch.object(ws, "_read_crontab", return_value=existing):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+                ws._install_linux(["06:30"], "claude -p hi", weekdays_only=True, dry_run=False)
+                final = mock_write.call_args[0][0]
+                # user's job preserved
+                self.assertIn("0 9 * * 1 /home/user/backup.sh", final)
+                # stale window-spread removed
+                self.assertFalse(any("1030" in l for l in final))
+                # new entry added
+                self.assertTrue(any("0630" in l for l in final))
+
+    def test_uninstall_linux_only_removes_our_entries(self):
+        existing = [
+            "0 9 * * 1 /home/user/backup.sh",
+            "30 6 * * 1-5 claude -p hi # com.dpt.window-spread.0630",
+            "30 11 * * 1-5 claude -p hi # com.dpt.window-spread.1130",
+        ]
+        with patch.object(ws, "_read_crontab", return_value=existing):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+                results = ws._uninstall_linux(dry_run=False)
+                self.assertEqual(len(results), 2)
+                final = mock_write.call_args[0][0]
+                # user's job preserved
+                self.assertEqual(final, ["0 9 * * 1 /home/user/backup.sh"])
+
+    def test_dry_run_does_not_write(self):
+        existing = ["30 6 * * 1-5 claude -p hi # com.dpt.window-spread.0630"]
+        with patch.object(ws, "_read_crontab", return_value=existing):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                ws._uninstall_linux(dry_run=True)
+                mock_write.assert_not_called()
+
+
+class WindowsSchtasksTest(unittest.TestCase):
+    def test_install_command_structure_weekdays(self):
+        results = ws._install_windows(
+            ["06:30"], "claude -p hi", weekdays_only=True, dry_run=True
+        )
+        self.assertEqual(len(results), 1)
+        cmd = results[0]["cmd"]
+        self.assertIn("schtasks", cmd[0])
+        self.assertIn("/create", cmd)
+        self.assertIn("/tn", cmd)
+        self.assertIn("com.dpt.window-spread.0630", cmd)
+        self.assertIn("/tr", cmd)
+        self.assertIn("/sc", cmd)
+        self.assertIn("WEEKLY", cmd)
+        self.assertIn("/d", cmd)
+        self.assertIn("MON,TUE,WED,THU,FRI", cmd)
+        self.assertIn("/st", cmd)
+        self.assertIn("06:30", cmd)
+        self.assertIn("/f", cmd)
+
+    def test_install_command_structure_daily(self):
+        results = ws._install_windows(
+            ["06:30"], "claude -p hi", weekdays_only=False, dry_run=True
+        )
+        cmd = results[0]["cmd"]
+        self.assertIn("DAILY", cmd)
+        self.assertNotIn("MON,TUE,WED,THU,FRI", cmd)
+
+    def test_install_uses_cmd_c_wrapper(self):
+        results = ws._install_windows(["06:30"], "claude -p hi", True, dry_run=True)
+        cmd = results[0]["cmd"]
+        idx = cmd.index("/tr")
+        self.assertTrue(cmd[idx + 1].startswith("cmd /c "))
+
+    def test_install_multiple_pings(self):
+        results = ws._install_windows(
+            ["06:30", "11:30", "16:30", "21:30"], "claude -p hi", True, dry_run=True
+        )
+        self.assertEqual(len(results), 4)
+        labels = [r["label"] for r in results]
+        self.assertEqual(
+            labels,
+            [
+                "com.dpt.window-spread.0630",
+                "com.dpt.window-spread.1130",
+                "com.dpt.window-spread.1630",
+                "com.dpt.window-spread.2130",
+            ],
+        )
+
+
+class LabelTest(unittest.TestCase):
+    def test_label_format(self):
+        self.assertEqual(ws._label("06:30"), "com.dpt.window-spread.0630")
+        self.assertEqual(ws._label("21:00"), "com.dpt.window-spread.2100")
+        self.assertEqual(ws._label("00:00"), "com.dpt.window-spread.0000")
+
+
+# ---------- glue / dispatcher / cli tests -----------------------------------
+
+
+import tempfile
+import os
+from unittest.mock import MagicMock
+
+
+class MacOSInstallEndToEndTest(unittest.TestCase):
+    def test_install_writes_plist_and_calls_launchctl(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(ws.Path, "home", return_value=Path(tmpdir)):
+                with patch.object(ws.subprocess, "run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0, stderr="")
+                    results = ws._install_macos(
+                        ["06:30"], "claude -p hi", weekdays_only=True, dry_run=False
+                    )
+                # plist file actually created
+                plist_path = Path(tmpdir) / "Library/LaunchAgents/com.dpt.window-spread.0630.plist"
+                self.assertTrue(plist_path.exists())
+                content = plist_path.read_text()
+                self.assertIn("com.dpt.window-spread.0630", content)
+                # launchctl called twice: unload (idempotent) + load
+                self.assertEqual(mock_run.call_count, 2)
+                self.assertEqual(mock_run.call_args_list[0][0][0][:2], ["launchctl", "unload"])
+                self.assertEqual(mock_run.call_args_list[1][0][0][:3], ["launchctl", "load", "-w"])
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["returncode"], 0)
+
+    def test_install_dry_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(ws.Path, "home", return_value=Path(tmpdir)):
+                with patch.object(ws.subprocess, "run") as mock_run:
+                    ws._install_macos(["06:30"], "claude -p hi", True, dry_run=True)
+                # no subprocess calls
+                mock_run.assert_not_called()
+                # no plist file
+                plist_dir = Path(tmpdir) / "Library/LaunchAgents"
+                self.assertFalse(plist_dir.exists() and any(plist_dir.iterdir()))
+
+
+class MacOSUninstallTest(unittest.TestCase):
+    def test_uninstall_removes_only_our_plists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            la = home / "Library/LaunchAgents"
+            la.mkdir(parents=True)
+            (la / "com.dpt.window-spread.0630.plist").write_text("ours")
+            (la / "com.dpt.window-spread.1130.plist").write_text("ours")
+            (la / "com.user.something-else.plist").write_text("user's, do not touch")
+            with patch.object(ws.Path, "home", return_value=home):
+                with patch.object(ws.subprocess, "run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0, stderr="")
+                    results = ws._uninstall_macos(dry_run=False)
+            self.assertEqual(len(results), 2)
+            self.assertFalse((la / "com.dpt.window-spread.0630.plist").exists())
+            self.assertFalse((la / "com.dpt.window-spread.1130.plist").exists())
+            # user's untouched
+            self.assertTrue((la / "com.user.something-else.plist").exists())
+
+    def test_uninstall_no_dir_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(ws.Path, "home", return_value=Path(tmpdir)):
+                self.assertEqual(ws._uninstall_macos(dry_run=False), [])
+
+
+class MacOSListTest(unittest.TestCase):
+    def test_list_returns_only_our_plists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            la = home / "Library/LaunchAgents"
+            la.mkdir(parents=True)
+            (la / "com.dpt.window-spread.0630.plist").write_text("ours")
+            (la / "com.user.thing.plist").write_text("user's")
+            with patch.object(ws.Path, "home", return_value=home):
+                results = ws._list_macos()
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["label"], "com.dpt.window-spread.0630")
+
+
+class WindowsUninstallTest(unittest.TestCase):
+    def test_uninstall_parses_csv_output(self):
+        csv_output = (
+            '"\\com.dpt.window-spread.0630","6/5/2026 06:30:00","Ready"\n'
+            '"\\com.user.something","6/5/2026 09:00:00","Ready"\n'
+            '"\\com.dpt.window-spread.1130","6/5/2026 11:30:00","Ready"\n'
+        )
+        with patch.object(ws.subprocess, "run") as mock_run:
+            # first call: query, then 2 deletes
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=csv_output, stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),
+                MagicMock(returncode=0, stdout="", stderr=""),
+            ]
+            results = ws._uninstall_windows(dry_run=False)
+        self.assertEqual(len(results), 2)
+        labels = [r["label"] for r in results]
+        self.assertIn("com.dpt.window-spread.0630", labels)
+        self.assertIn("com.dpt.window-spread.1130", labels)
+        # com.user.something not touched
+        self.assertNotIn("com.user.something", labels)
+
+    def test_uninstall_dry_run_no_delete(self):
+        csv_output = '"\\com.dpt.window-spread.0630","6/5/2026 06:30:00","Ready"\n'
+        with patch.object(ws.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=csv_output, stderr="")
+            results = ws._uninstall_windows(dry_run=True)
+        # only 1 call (the query), not the delete
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["dry_run"])
+
+
+class WindowsListTest(unittest.TestCase):
+    def test_list_filters_our_entries(self):
+        csv_output = (
+            '"\\com.dpt.window-spread.0630","6/5/2026 06:30:00","Ready"\n'
+            '"\\com.user.foo","6/5/2026 09:00:00","Ready"\n'
+        )
+        with patch.object(ws.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=csv_output, stderr="")
+            results = ws._list_windows()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["label"], "com.dpt.window-spread.0630")
+
+
+class DispatcherTest(unittest.TestCase):
+    def test_dispatch_macos(self):
+        with patch.object(ws.platform, "system", return_value="Darwin"):
+            with patch.object(ws, "_install_macos") as mock:
+                mock.return_value = []
+                ws._dispatch("install", ["06:30"], "cmd", True, False)
+                mock.assert_called_once()
+
+    def test_dispatch_linux(self):
+        with patch.object(ws.platform, "system", return_value="Linux"):
+            with patch.object(ws, "_install_linux") as mock:
+                mock.return_value = []
+                ws._dispatch("install", ["06:30"], "cmd", True, False)
+                mock.assert_called_once()
+
+    def test_dispatch_windows(self):
+        with patch.object(ws.platform, "system", return_value="Windows"):
+            with patch.object(ws, "_install_windows") as mock:
+                mock.return_value = []
+                ws._dispatch("install", ["06:30"], "cmd", True, False)
+                mock.assert_called_once()
+
+    def test_dispatch_unsupported_os(self):
+        with patch.object(ws.platform, "system", return_value="Plan9"):
+            with self.assertRaises(RuntimeError):
+                ws._dispatch("install", [], "cmd", False, False)
+
+
+class CmdInstallTest(unittest.TestCase):
+    def test_cmd_install_reads_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"spread": {"pings": ["06:30", "11:30"]}}, f)
+            fname = f.name
+        try:
+            with patch.object(ws, "_dispatch") as mock_dispatch:
+                mock_dispatch.return_value = [{"returncode": 0}, {"returncode": 0}]
+                buf = StringIO()
+                with patch("sys.stdout", buf):
+                    ret = ws.main(["install", fname, "--weekdays", "--dry-run"])
+                self.assertEqual(ret, 0)
+                args = mock_dispatch.call_args[0]
+                self.assertEqual(args[0], "install")
+                self.assertEqual(args[1], ["06:30", "11:30"])
+        finally:
+            os.unlink(fname)
+
+    def test_cmd_install_reads_stdin(self):
+        payload = json.dumps({"spread": {"pings": ["06:30"]}})
+        with patch("sys.stdin", StringIO(payload)):
+            with patch.object(ws, "_dispatch") as mock_dispatch:
+                mock_dispatch.return_value = [{"returncode": 0}]
+                buf = StringIO()
+                with patch("sys.stdout", buf):
+                    ret = ws.main(["install", "-", "--dry-run"])
+                self.assertEqual(ret, 0)
+                self.assertEqual(mock_dispatch.call_args[0][1], ["06:30"])
+
+    def test_cmd_install_returns_nonzero_on_failure(self):
+        payload = json.dumps({"spread": {"pings": ["06:30"]}})
+        with patch("sys.stdin", StringIO(payload)):
+            with patch.object(ws, "_dispatch") as mock_dispatch:
+                mock_dispatch.return_value = [{"returncode": 1, "stderr": "boom"}]
+                buf = StringIO()
+                with patch("sys.stdout", buf):
+                    ret = ws.main(["install", "-"])
+                self.assertEqual(ret, 1)
+
+
+class CmdUninstallTest(unittest.TestCase):
+    def test_cmd_uninstall_calls_dispatch(self):
+        with patch.object(ws, "_dispatch") as mock_dispatch:
+            mock_dispatch.return_value = []
+            buf = StringIO()
+            with patch("sys.stdout", buf):
+                ret = ws.main(["uninstall"])
+            self.assertEqual(ret, 0)
+            self.assertEqual(mock_dispatch.call_args[0][0], "uninstall")
+
+    def test_cmd_uninstall_dry_run(self):
+        with patch.object(ws, "_dispatch") as mock_dispatch:
+            mock_dispatch.return_value = []
+            buf = StringIO()
+            with patch("sys.stdout", buf):
+                ws.main(["uninstall", "--dry-run"])
+            args = mock_dispatch.call_args[0]
+            self.assertTrue(args[1])  # dry_run=True
+
+
+class CmdListTest(unittest.TestCase):
+    def test_cmd_list_emits_json(self):
+        with patch.object(ws, "_dispatch") as mock_dispatch:
+            mock_dispatch.return_value = [{"label": "com.dpt.window-spread.0630"}]
+            buf = StringIO()
+            with patch("sys.stdout", buf):
+                ret = ws.main(["list"])
+            self.assertEqual(ret, 0)
+            out = json.loads(buf.getvalue())
+            self.assertIn("entries", out)
+            self.assertEqual(len(out["entries"]), 1)
+
+
+class ErrorPathsTest(unittest.TestCase):
+    def test_empty_pings_compute_raises(self):
+        with self.assertRaises(ValueError):
+            ws.parse_blocks("")
+
+    def test_install_with_legacy_pings_format(self):
+        # JSON without "spread" key, just top-level "pings"
+        payload = json.dumps({"pings": ["06:30"]})
+        with patch("sys.stdin", StringIO(payload)):
+            with patch.object(ws, "_dispatch") as mock_dispatch:
+                mock_dispatch.return_value = [{"returncode": 0}]
+                buf = StringIO()
+                with patch("sys.stdout", buf):
+                    ws.main(["install", "-", "--dry-run"])
+                self.assertEqual(mock_dispatch.call_args[0][1], ["06:30"])
+
+    def test_read_crontab_no_existing(self):
+        with patch.object(ws.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="no crontab")
+            self.assertEqual(ws._read_crontab(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
+import platform
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 WINDOW_LEN_MIN = 5 * 60  # 5h in minutes
 DAY_MIN = 24 * 60
@@ -294,50 +295,329 @@ def cmd_compute(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_install(args: argparse.Namespace) -> int:
-    """Read pings JSON from file or stdin, invoke claude-code-scheduler add per ping."""
-    if args.path == "-":
-        data = json.load(sys.stdin)
-    else:
-        with open(args.path) as f:
-            data = json.load(f)
+# ---------- cross-platform scheduler -----------------------------------------
 
-    pings: list[str] = data["spread"]["pings"] if "spread" in data else data["pings"]
-    command = args.command
-    weekdays_only = args.weekdays
+LABEL_PREFIX = "com.dpt.window-spread"
+DEFAULT_COMMAND = "claude -p hi --output-format json"
 
-    scheduler = shutil.which("claude-code-scheduler") or shutil.which("ccs")
-    if scheduler is None:
-        print(
-            "claude-code-scheduler binary not found in PATH. Install via:\n"
-            "  /plugin install scheduler@claude-code-scheduler",
-            file=sys.stderr,
+
+def _label(ping: str) -> str:
+    """ping '06:00' -> 'com.dpt.window-spread.0600'."""
+    return f"{LABEL_PREFIX}.{ping.replace(':', '')}"
+
+
+def _split_hm(ping: str) -> tuple[int, int]:
+    h, m = ping.split(":")
+    return int(h), int(m)
+
+
+# ---- macOS launchd ----------------------------------------------------------
+
+
+def _macos_plist(label: str, command: str, hour: int, minute: int, weekdays_only: bool) -> str:
+    """Build a launchd plist XML.
+
+    Weekday in launchd: 1=Mon..7=Sun. Weekdays-only = entries for 1-5.
+    """
+    if weekdays_only:
+        intervals = "".join(
+            f"        <dict>\n"
+            f"            <key>Hour</key><integer>{hour}</integer>\n"
+            f"            <key>Minute</key><integer>{minute}</integer>\n"
+            f"            <key>Weekday</key><integer>{wd}</integer>\n"
+            f"        </dict>\n"
+            for wd in (1, 2, 3, 4, 5)
         )
-        return 2
+        cal = f"    <key>StartCalendarInterval</key>\n    <array>\n{intervals}    </array>"
+    else:
+        cal = (
+            f"    <key>StartCalendarInterval</key>\n"
+            f"    <dict>\n"
+            f"        <key>Hour</key><integer>{hour}</integer>\n"
+            f"        <key>Minute</key><integer>{minute}</integer>\n"
+            f"    </dict>"
+        )
+    log_dir = Path.home() / "Library/Logs/window-spread"
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        f"    <key>Label</key>\n"
+        f"    <string>{label}</string>\n"
+        f"    <key>ProgramArguments</key>\n"
+        f"    <array>\n"
+        f"        <string>/bin/bash</string>\n"
+        f"        <string>-lc</string>\n"
+        f"        <string>{command}</string>\n"
+        f"    </array>\n"
+        f"{cal}\n"
+        f"    <key>StandardOutPath</key>\n"
+        f"    <string>{log_dir}/{label}.out</string>\n"
+        f"    <key>StandardErrorPath</key>\n"
+        f"    <string>{log_dir}/{label}.err</string>\n"
+        f"</dict>\n"
+        f"</plist>\n"
+    )
 
+
+def _install_macos(pings: list[str], command: str, weekdays_only: bool, dry_run: bool) -> list[dict]:
+    plist_dir = Path.home() / "Library/LaunchAgents"
+    log_dir = Path.home() / "Library/Logs/window-spread"
+    if not dry_run:
+        plist_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
     results = []
     for ping in pings:
-        # natural-language schedule string for claude-code-scheduler
-        days = "every weekday" if weekdays_only else "every day"
-        schedule_str = f"{days} at {ping}"
-        cmd = [scheduler, "add", schedule_str, command]
-        if args.dry_run:
-            results.append({"ping": ping, "cmd": cmd, "dry_run": True})
+        hour, minute = _split_hm(ping)
+        label = _label(ping)
+        plist = _macos_plist(label, command, hour, minute, weekdays_only)
+        plist_path = plist_dir / f"{label}.plist"
+        if dry_run:
+            results.append({"ping": ping, "label": label, "path": str(plist_path), "dry_run": True})
+            continue
+        # idempotent: unload existing first (ignore error)
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+        plist_path.write_text(plist)
+        proc = subprocess.run(
+            ["launchctl", "load", "-w", str(plist_path)], capture_output=True, text=True
+        )
+        results.append(
+            {
+                "ping": ping,
+                "label": label,
+                "path": str(plist_path),
+                "returncode": proc.returncode,
+                "stderr": proc.stderr.strip(),
+            }
+        )
+    return results
+
+
+def _uninstall_macos(dry_run: bool) -> list[dict]:
+    plist_dir = Path.home() / "Library/LaunchAgents"
+    if not plist_dir.exists():
+        return []
+    results = []
+    for plist_path in sorted(plist_dir.glob(f"{LABEL_PREFIX}.*.plist")):
+        label = plist_path.stem
+        if dry_run:
+            results.append({"label": label, "path": str(plist_path), "dry_run": True})
+            continue
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+        plist_path.unlink(missing_ok=True)
+        results.append({"label": label, "path": str(plist_path), "removed": True})
+    return results
+
+
+def _list_macos() -> list[dict]:
+    plist_dir = Path.home() / "Library/LaunchAgents"
+    if not plist_dir.exists():
+        return []
+    return [
+        {"label": p.stem, "path": str(p)}
+        for p in sorted(plist_dir.glob(f"{LABEL_PREFIX}.*.plist"))
+    ]
+
+
+# ---- Linux cron -------------------------------------------------------------
+
+
+def _cron_line(ping: str, command: str, weekdays_only: bool) -> str:
+    """Return a single crontab line with a marker comment."""
+    hour, minute = _split_hm(ping)
+    dow = "1-5" if weekdays_only else "*"
+    return f"{minute} {hour} * * {dow} {command} # {_label(ping)}"
+
+
+def _read_crontab() -> list[str]:
+    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        # no crontab yet — empty
+        return []
+    return proc.stdout.splitlines()
+
+
+def _write_crontab(lines: list[str]) -> subprocess.CompletedProcess:
+    content = "\n".join(lines) + "\n" if lines else ""
+    return subprocess.run(["crontab", "-"], input=content, capture_output=True, text=True)
+
+
+def _install_linux(pings: list[str], command: str, weekdays_only: bool, dry_run: bool) -> list[dict]:
+    existing = [l for l in _read_crontab() if LABEL_PREFIX not in l]
+    new_lines = [_cron_line(ping, command, weekdays_only) for ping in pings]
+    final = existing + new_lines
+    if dry_run:
+        return [{"ping": ping, "line": line, "dry_run": True} for ping, line in zip(pings, new_lines)]
+    proc = _write_crontab(final)
+    return [
+        {
+            "ping": ping,
+            "line": line,
+            "returncode": proc.returncode,
+            "stderr": proc.stderr.strip(),
+        }
+        for ping, line in zip(pings, new_lines)
+    ]
+
+
+def _uninstall_linux(dry_run: bool) -> list[dict]:
+    existing = _read_crontab()
+    keep = [l for l in existing if LABEL_PREFIX not in l]
+    removed = [l for l in existing if LABEL_PREFIX in l]
+    if dry_run:
+        return [{"line": l, "dry_run": True} for l in removed]
+    if removed:
+        _write_crontab(keep)
+    return [{"line": l, "removed": True} for l in removed]
+
+
+def _list_linux() -> list[dict]:
+    return [{"line": l} for l in _read_crontab() if LABEL_PREFIX in l]
+
+
+# ---- Windows Task Scheduler -------------------------------------------------
+
+
+def _install_windows(pings: list[str], command: str, weekdays_only: bool, dry_run: bool) -> list[dict]:
+    results = []
+    for ping in pings:
+        label = _label(ping)
+        cmd = [
+            "schtasks",
+            "/create",
+            "/tn",
+            label,
+            "/tr",
+            f'cmd /c {command}',
+            "/sc",
+            "WEEKLY" if weekdays_only else "DAILY",
+            "/st",
+            ping,
+            "/f",
+        ]
+        if weekdays_only:
+            cmd[-1:-1] = ["/d", "MON,TUE,WED,THU,FRI"]
+        if dry_run:
+            results.append({"ping": ping, "label": label, "cmd": cmd, "dry_run": True})
             continue
         proc = subprocess.run(cmd, capture_output=True, text=True)
         results.append(
             {
                 "ping": ping,
-                "cmd": cmd,
+                "label": label,
                 "returncode": proc.returncode,
                 "stdout": proc.stdout.strip(),
                 "stderr": proc.stderr.strip(),
             }
         )
+    return results
 
-    json.dump({"installed": results}, sys.stdout, indent=2)
+
+def _uninstall_windows(dry_run: bool) -> list[dict]:
+    proc = subprocess.run(
+        ["schtasks", "/query", "/fo", "csv", "/nh"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        return []
+    labels = []
+    for line in proc.stdout.splitlines():
+        # CSV: "TaskName","NextRunTime","Status"
+        parts = line.split('","')
+        if not parts:
+            continue
+        tn = parts[0].lstrip('"').lstrip("\\")
+        if tn.startswith(LABEL_PREFIX):
+            labels.append(tn)
+    results = []
+    for label in labels:
+        if dry_run:
+            results.append({"label": label, "dry_run": True})
+            continue
+        proc = subprocess.run(
+            ["schtasks", "/delete", "/tn", label, "/f"], capture_output=True, text=True
+        )
+        results.append({"label": label, "removed": proc.returncode == 0})
+    return results
+
+
+def _list_windows() -> list[dict]:
+    proc = subprocess.run(
+        ["schtasks", "/query", "/fo", "csv", "/nh"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        parts = line.split('","')
+        if not parts:
+            continue
+        tn = parts[0].lstrip('"').lstrip("\\")
+        if tn.startswith(LABEL_PREFIX):
+            out.append({"label": tn})
+    return out
+
+
+# ---- dispatcher -------------------------------------------------------------
+
+
+def _dispatch(action: str, *args, **kwargs):
+    system = platform.system()
+    if system == "Darwin":
+        funcs = {
+            "install": _install_macos,
+            "uninstall": _uninstall_macos,
+            "list": _list_macos,
+        }
+    elif system == "Linux":
+        funcs = {
+            "install": _install_linux,
+            "uninstall": _uninstall_linux,
+            "list": _list_linux,
+        }
+    elif system == "Windows":
+        funcs = {
+            "install": _install_windows,
+            "uninstall": _uninstall_windows,
+            "list": _list_windows,
+        }
+    else:
+        raise RuntimeError(f"unsupported OS: {system}")
+    return funcs[action](*args, **kwargs)
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Install pings via the local OS scheduler (launchd / cron / Task Scheduler)."""
+    if args.path == "-":
+        data = json.load(sys.stdin)
+    else:
+        with open(args.path) as f:
+            data = json.load(f)
+    pings: list[str] = data["spread"]["pings"] if "spread" in data else data["pings"]
+    command = args.command
+    weekdays_only = args.weekdays
+
+    results = _dispatch("install", pings, command, weekdays_only, args.dry_run)
+    json.dump({"os": platform.system(), "installed": results}, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0 if all(r.get("returncode", 0) == 0 for r in results) else 1
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """Remove all entries with our LABEL_PREFIX from the local OS scheduler."""
+    results = _dispatch("uninstall", args.dry_run)
+    json.dump({"os": platform.system(), "removed": results}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """List currently installed window-spread entries."""
+    results = _dispatch("list")
+    json.dump({"os": platform.system(), "entries": results}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
 
 
 # ---------- entrypoint -------------------------------------------------------
@@ -351,16 +631,23 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--blocks", required=True, help='e.g. "8:30-12:20,14:00-18:00,20:00-23:00"')
     pc.set_defaults(func=cmd_compute)
 
-    pi = sub.add_parser("install", help="install pings via claude-code-scheduler")
+    pi = sub.add_parser("install", help="install pings via local OS scheduler")
     pi.add_argument("path", help="path to pings JSON, or '-' for stdin")
     pi.add_argument(
         "--command",
-        default='claude -p "hi" --output-format json',
+        default=DEFAULT_COMMAND,
         help="command each ping will run (default: claude -p hi)",
     )
     pi.add_argument("--weekdays", action="store_true", help="weekdays only (default: every day)")
     pi.add_argument("--dry-run", action="store_true", help="print commands without running")
     pi.set_defaults(func=cmd_install)
+
+    pu = sub.add_parser("uninstall", help="remove all our entries from the OS scheduler")
+    pu.add_argument("--dry-run", action="store_true", help="print what would be removed")
+    pu.set_defaults(func=cmd_uninstall)
+
+    pl = sub.add_parser("list", help="list installed window-spread entries")
+    pl.set_defaults(func=cmd_list)
 
     return p
 
