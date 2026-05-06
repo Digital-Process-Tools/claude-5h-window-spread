@@ -92,9 +92,7 @@ Block 1 splits at 11:00 (W1 → W2). Block 2 splits at 16:00 (W2 → W3). Evenin
 /plugin install claude-5h-window-spread@dpt-plugins
 ```
 
-That's it. Required scheduler ([`claude-code-scheduler`](https://github.com/jshchnz/claude-code-scheduler) by jshchnz) auto-installs as a plugin dependency.
-
-Works on macOS, Linux, Windows. Uses local cron — no cloud, no API keys, no auth dance.
+That's it. Works on macOS, Linux, Windows. Uses local cron — no cloud, no API keys, no auth dance.
 
 ---
 
@@ -125,28 +123,17 @@ Apply?
 
 Confirm. Done. Pings install via launchd / cron / Task Scheduler.
 
-### Check your usage
+### Check installed pings
 
 ```
 /window-spread status
 ```
 
-```
-Last 30 days
-─────────────
-Avg windows/day: 3.4
-Avg utilization: 71%
-Cap hits: 5
-Suggested: shift evening ping from 21 to 20:30
-```
+Lists installed pings with next fire times.
 
 ### Re-tune
 
-```
-/window-spread suggest
-```
-
-Re-analyses your transcripts. Proposes tweaks. One-command apply.
+Re-run `/window-spread setup` with a different work pattern. Install is destructive-replace — old pings are removed before new ones are written.
 
 ---
 
@@ -203,10 +190,6 @@ For everyone else who's been locked out at 11am — keep reading.
 
 ---
 
-## Credits
-
-Built on top of [`jshchnz/claude-code-scheduler`](https://github.com/jshchnz/claude-code-scheduler) — generic cross-platform scheduler for `claude -p`. Hat tip to [vdsmon/claude-warmup](https://github.com/vdsmon/claude-warmup) for the original "warmup" idea.
-
 ## Development
 
 Pure stdlib Python. No build step, no deps, no virtualenv required.
@@ -217,7 +200,7 @@ Pure stdlib Python. No build step, no deps, no virtualenv required.
 python3 -m unittest tests.test_window_spread
 ```
 
-42 tests cover time parsing, block parsing, simulation math, the optimization algorithm, the natural baseline, and the `compute` subcommand end-to-end.
+79 tests cover time parsing, block parsing, simulation math, the optimization algorithm, the natural baseline, and the `compute` subcommand end-to-end.
 
 ### Pre-push hook
 
