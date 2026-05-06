@@ -298,7 +298,7 @@ def cmd_compute(args: argparse.Namespace) -> int:
 # ---------- cross-platform scheduler -----------------------------------------
 
 LABEL_PREFIX = "com.dpt.window-spread"
-DEFAULT_COMMAND = "claude -p hi --output-format json"
+DEFAULT_COMMAND = 'claude -p "Just say hi" --output-format json --model haiku'
 
 
 def _label(ping: str) -> str:
@@ -645,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument(
         "--command",
         default=DEFAULT_COMMAND,
-        help="command each ping will run (default: claude -p hi)",
+        help="command each ping will run (default: claude -p 'Just say hi' --model haiku)",
     )
     pi.add_argument("--weekdays", action="store_true", help="weekdays only (default: every day)")
     pi.add_argument("--dry-run", action="store_true", help="print commands without running")
