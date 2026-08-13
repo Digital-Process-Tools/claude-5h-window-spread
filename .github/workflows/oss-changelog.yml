@@ -1,0 +1,45 @@
+# Managed by the oss plugin. This file is OVERWRITTEN every time /oss:scaffold
+# runs, so an edit here is lost at the next update. To change what it does,
+# copy it somewhere outside .oss/ and point at your copy.
+
+name: oss changelog
+
+on:
+  pull_request:
+
+jobs:
+  fragment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Fragments parse and name a real section
+        run: python3 .oss/assemble_changelog.py --check --dir changelog.d --changelog CHANGELOG.md
+
+      # A change to what this project DOES must say so where users read it.
+      - name: A user-visible change carries a fragment
+        if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+        # Through env, never interpolated into the script body: a ${{ }} expansion is
+        # textual substitution, so whatever it carries becomes shell source, and a ref
+        # is attacker-influenced on a fork pull request.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          changed=$(git diff --name-only "origin/$BASE_REF"...HEAD)
+          fragments=$(printf '%s\n' "$changed" | grep -E '^changelog.d/[0-9]+\..+\.md$' || true)
+
+          if [ -n "$fragments" ]; then
+            echo "Fragment present:"
+            printf '%s\n' "$fragments"
+            exit 0
+          fi
+          echo "No changelog fragment in this pull request." >&2
+          echo "Add changelog.d/<issue>.<section>.md, or label the pull request" >&2
+          echo "'no-changelog' when the change is genuinely invisible to users." >&2
+          exit 1
