@@ -1,0 +1,38 @@
+# Hand-written, not generated. /oss:scaffold ships no test workflow, deliberately --
+# runner, matrix and version are decisions it has no way to measure. This file is the
+# decision for this repo, and is not overwritten by the plugin.
+#
+# The matrix is three operating systems because window-spread.py branches on
+# platform.system() and installs through launchd, cron or Task Scheduler depending on
+# the answer. The dispatch tests mock platform.system(), so they run anywhere -- but a
+# green run on one OS is the weakest evidence about the other two, which is the bar
+# CLAUDE.md sets for this repo.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unittest:
+    name: unittest (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The command recorded in .oss.json, so CI and the maintainer loop check the
+      # same thing. Stdlib unittest, no dependencies to install.
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -v
