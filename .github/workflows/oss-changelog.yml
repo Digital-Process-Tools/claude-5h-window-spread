@@ -19,6 +19,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The assembler's one dependency. Without it the --check step below
+      # reports `skipped` and exits non-zero -- correctly, since it can
+      # establish nothing about the fragments -- so the workflow is red on
+      # the first pull request that actually carries one.
+      - name: Install the assembler's dependency
+        run: python3 -m pip install --disable-pip-version-check markdown-it-py
+
       - name: Fragments parse and name a real section
         run: python3 .oss/assemble_changelog.py --check --dir changelog.d --changelog CHANGELOG.md
 
