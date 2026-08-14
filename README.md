@@ -155,13 +155,56 @@ python3 scripts/window-spread.py install pings.json --force-replace-crontab
 
 That flag **discards whatever is in the crontab**. There is no backup.
 
-### On Linux: what `--command` may contain
+### What `install` checks, and where
 
-A crontab entry is a single line, and cron treats an unescaped `%` as a newline.
-A `--command` containing a newline, a carriage return or a bare `%` is refused
-before anything is written — otherwise it would split into a second entry that
-runs on its own schedule and that `uninstall` cannot see. Write `\%` for a
-literal percent sign.
+Install is destructive-replace: it removes your existing window-spread entries
+before writing new ones. So everything it checks, it checks **before** that
+removal — a refusal never costs you the pings you already had.
+
+**Ping times, on every platform.** A ping must be a zero-padded 24h time,
+`HH:MM`, from `00:00` to `23:59`. Anything else is refused and nothing is
+touched. This used to be enforced only as a side effect of the code that split
+the hour from the minute, which the Windows path never ran.
+
+**The command, per platform** — because what a scheduler can carry differs:
+
+| Platform | Scheduler | Rule for `--command` |
+| --- | --- | --- |
+| Linux | cron | No newline, carriage return, or bare `%` |
+| macOS | launchd | No control characters except tab and newline; valid UTF-8 |
+| Windows | Task Scheduler | None imposed by this tool |
+
+The rules differ in **both** directions, which is why there is no single one. A
+newline is fatal on cron and harmless on launchd; a control character is
+harmless on cron and cannot be represented on launchd at all.
+
+On Linux, a crontab entry is a single line and cron treats an unescaped `%` as
+a newline, so a `--command` containing a newline, a carriage return or a bare
+`%` is refused — otherwise it would split into a second entry that runs on its
+own schedule and that `uninstall` cannot see. Write `\%` for a literal percent
+sign.
+
+On macOS the job is a launchd property list, built with a real plist serialiser
+rather than by pasting the command into an XML template. A command containing
+`&`, `<` or `>` — `claude -p 'a && b'`, a redirect — is encoded correctly
+instead of producing a document launchd cannot parse. What remains is XML's own
+limit: a C0 control character cannot appear in a plist, and a carriage return
+that *can* be written is normalised to a newline when the document is read, so
+launchd would run something other than what you typed. Both are refused rather
+than silently rewritten.
+
+Windows imposes no command rule here. `schtasks /tr` applies its own quoting to
+`cmd /c <command>` and that has not been measured on a Windows machine, so no
+rule is claimed for it.
+
+### On macOS: a failed install tries to put your previous ping back
+
+If launchd refuses the new job, the plist that was there before is written back
+and reloaded. The result carries a `"restored"` field saying whether that
+worked — `false` if there was no previous plist to restore, or if reloading it
+also failed. Previously the old job was unloaded and its file overwritten
+before anything checked the new one, so a rejected job simply cost you the
+working one.
 
 ---
 
