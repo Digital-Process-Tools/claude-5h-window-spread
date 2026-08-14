@@ -73,7 +73,9 @@ Get the user from "I keep hitting cap" to "I have 4 pings scheduled" in under 90
 
    On Linux it rewrites the whole crontab, so it reads the existing one first and keeps every entry that is not ours. If that read fails, install **refuses** and exits non-zero with `"error": "crontab-unreadable"` — report that to the user verbatim. Do **not** re-run with `--force-replace-crontab` to make the error go away: that flag discards whatever is in their crontab, and it is theirs to choose.
 
-   Never pass a `--command` containing a newline or a bare `%`; on Linux the script refuses both, because either one splits the cron line into a second entry that uninstall cannot find.
+   Never pass a `--command` containing a newline or a bare `%`; on Linux the script refuses both, because either one splits the cron line into a second entry that uninstall cannot find. macOS and Windows do not impose that rule. macOS imposes a different one: no control characters except tab and newline, and valid UTF-8. So a command can be refused on one platform and accepted on another in either direction — never assume a command that installed elsewhere will install here.
+
+   Ping times are checked on every platform before anything is removed: each must be `HH:MM`, zero-padded, `00:00`-`23:59`. If the pings JSON carries anything else, install exits 2 and touches nothing — pass the file `compute` produced rather than hand-editing times.
 
 7. **Confirm done.** "Installed. Next ping fires <next time>. Run `/window-spread status` to verify."
 

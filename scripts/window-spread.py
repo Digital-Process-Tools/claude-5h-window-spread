@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import plistlib
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -306,7 +308,29 @@ def _label(ping: str) -> str:
     return f"{LABEL_PREFIX}.{ping.replace(':', '')}"
 
 
+# A ping is a zero-padded 24h wall-clock time, which is what `format_time`
+# emits and what every scheduler here is handed. The shape is the same on all
+# three platforms, so the check is too.
+_PING_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+def _validate_ping(ping: str) -> None:
+    """Refuse a ping that is not 'HH:MM'.
+
+    Until #7 this check existed only as a side effect of the `int()` calls in
+    `_split_hm`, which the Windows branch never called -- so an arbitrary
+    string reached a schtasks task name and start time. The check is named and
+    called explicitly now so that a new platform branch cannot inherit the
+    guarantee by accident, or miss it by accident.
+    """
+    if not isinstance(ping, str) or not _PING_RE.match(ping):
+        raise ValueError(
+            f"ping must be a zero-padded 24h time 'HH:MM', got {ping!r}"
+        )
+
+
 def _split_hm(ping: str) -> tuple[int, int]:
+    _validate_ping(ping)
     h, m = ping.split(":")
     return int(h), int(m)
 
@@ -314,52 +338,73 @@ def _split_hm(ping: str) -> tuple[int, int]:
 # ---- macOS launchd ----------------------------------------------------------
 
 
+# Everything a plist string may hold. XML 1.0 forbids the C0 controls outright
+# except tab, LF and CR; of those three, CR is *legal to write* and then
+# normalised to LF by every conforming parser on the way back -- so a command
+# containing one would be silently rewritten before launchd ever ran it.
+# Refusing it is cheaper than shipping a command the user did not type.
+_PLIST_ALLOWED_CONTROLS = frozenset("\t\n")
+
+
+def _validate_plist_command(command: str) -> None:
+    """Refuse a command a launchd plist cannot carry unchanged.
+
+    macOS is not "no rule" -- it is a *different* rule from cron's (#6). A
+    newline and a bare `%` are fine here and fatal on a crontab line; a C0
+    control character is fine on a crontab line and cannot be represented in
+    an XML plist at all. `plistlib.dumps` raises `ValueError` on one and
+    `UnicodeEncodeError` on an undecodable argv byte, both from inside the
+    installer -- i.e. after `cmd_install` has already removed every existing
+    ping. This states the rule where it can be applied before that.
+    """
+    for ch in command:
+        if ch < " " and ch not in _PLIST_ALLOWED_CONTROLS:
+            raise ValueError(
+                f"--command may not contain the control character "
+                f"U+{ord(ch):04X}: a launchd plist is XML and cannot carry it"
+            )
+    try:
+        command.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        # A POSIX argv that is not valid UTF-8 arrives as a lone surrogate.
+        raise ValueError(
+            "--command is not valid UTF-8 and cannot be written to a plist"
+        ) from exc
+
+
 def _macos_plist(label: str, command: str, hour: int, minute: int, weekdays_only: bool) -> str:
     """Build a launchd plist XML.
 
     Weekday in launchd: 1=Mon..7=Sun. Weekdays-only = entries for 1-5.
+
+    Serialised with `plistlib.dumps` rather than interpolated into an XML
+    template (#6). The template could not encode a command containing `&` or
+    `<` -- both ordinary in a shell command -- so `claude -p 'a && b'`
+    produced a document launchd cannot parse, and a command carrying
+    `</string></array><key>...` produced one it parses as a *different* job.
+    A serialiser has no such category: every value is encoded, so `&` and `<`
+    stop being special. What remains is a *narrower* rule, not no rule --
+    see `_validate_plist_command`, which is called below.
     """
+    # cmd_install validates too; this is the check at the point of use, so a
+    # direct caller gets this tool's message rather than a plistlib traceback.
+    _validate_plist_command(command)
+    interval: object
     if weekdays_only:
-        intervals = "".join(
-            f"        <dict>\n"
-            f"            <key>Hour</key><integer>{hour}</integer>\n"
-            f"            <key>Minute</key><integer>{minute}</integer>\n"
-            f"            <key>Weekday</key><integer>{wd}</integer>\n"
-            f"        </dict>\n"
-            for wd in (1, 2, 3, 4, 5)
-        )
-        cal = f"    <key>StartCalendarInterval</key>\n    <array>\n{intervals}    </array>"
+        interval = [
+            {"Hour": hour, "Minute": minute, "Weekday": wd} for wd in (1, 2, 3, 4, 5)
+        ]
     else:
-        cal = (
-            f"    <key>StartCalendarInterval</key>\n"
-            f"    <dict>\n"
-            f"        <key>Hour</key><integer>{hour}</integer>\n"
-            f"        <key>Minute</key><integer>{minute}</integer>\n"
-            f"    </dict>"
-        )
+        interval = {"Hour": hour, "Minute": minute}
     log_dir = Path.home() / "Library/Logs/window-spread"
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-        '<plist version="1.0">\n'
-        "<dict>\n"
-        f"    <key>Label</key>\n"
-        f"    <string>{label}</string>\n"
-        f"    <key>ProgramArguments</key>\n"
-        f"    <array>\n"
-        f"        <string>/bin/bash</string>\n"
-        f"        <string>-lc</string>\n"
-        f"        <string>{command}</string>\n"
-        f"    </array>\n"
-        f"{cal}\n"
-        f"    <key>StandardOutPath</key>\n"
-        f"    <string>{log_dir}/{label}.out</string>\n"
-        f"    <key>StandardErrorPath</key>\n"
-        f"    <string>{log_dir}/{label}.err</string>\n"
-        f"</dict>\n"
-        f"</plist>\n"
-    )
+    doc = {
+        "Label": label,
+        "ProgramArguments": ["/bin/bash", "-lc", command],
+        "StartCalendarInterval": interval,
+        "StandardOutPath": f"{log_dir}/{label}.out",
+        "StandardErrorPath": f"{log_dir}/{label}.err",
+    }
+    return plistlib.dumps(doc).decode("utf-8")
 
 
 def _install_macos(pings: list[str], command: str, weekdays_only: bool, dry_run: bool) -> list[dict]:
@@ -377,21 +422,40 @@ def _install_macos(pings: list[str], command: str, weekdays_only: bool, dry_run:
         if dry_run:
             results.append({"ping": ping, "label": label, "path": str(plist_path), "dry_run": True})
             continue
+        # Keep the job that is already there until the new one is known to
+        # load (#6). The previous order unloaded and overwrote first, so a
+        # plist launchd refused left the user with neither the new ping nor
+        # the one they had, and no copy of it anywhere.
+        previous = plist_path.read_bytes() if plist_path.exists() else None
         # idempotent: unload existing first (ignore error)
         subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
-        plist_path.write_text(plist)
+        # write_bytes, not write_text: the document declares UTF-8 in its own
+        # XML header, and write_text would encode with the process locale.
+        plist_path.write_bytes(plist.encode("utf-8"))
         proc = subprocess.run(
             ["launchctl", "load", "-w", str(plist_path)], capture_output=True, text=True
         )
-        results.append(
-            {
-                "ping": ping,
-                "label": label,
-                "path": str(plist_path),
-                "returncode": proc.returncode,
-                "stderr": proc.stderr.strip(),
-            }
-        )
+        entry = {
+            "ping": ping,
+            "label": label,
+            "path": str(plist_path),
+            "returncode": proc.returncode,
+            "stderr": proc.stderr.strip(),
+        }
+        if proc.returncode != 0:
+            if previous is None:
+                # nothing was there: leave nothing behind either.
+                plist_path.unlink(missing_ok=True)
+                entry["restored"] = False
+            else:
+                plist_path.write_bytes(previous)
+                restore = subprocess.run(
+                    ["launchctl", "load", "-w", str(plist_path)],
+                    capture_output=True,
+                    text=True,
+                )
+                entry["restored"] = restore.returncode == 0
+        results.append(entry)
     return results
 
 
@@ -642,6 +706,12 @@ def _list_linux() -> list[dict]:
 def _install_windows(pings: list[str], command: str, weekdays_only: bool, dry_run: bool) -> list[dict]:
     results = []
     for ping in pings:
+        # The other two branches reach _validate_ping through _split_hm; this
+        # one has no hour/minute to split, which is exactly how it ended up
+        # putting an arbitrary string into a task name and a /st value (#7).
+        # cmd_install validates too -- this is the check at the point of use,
+        # for anyone calling the helper directly.
+        _validate_ping(ping)
         label = _label(ping)
         cmd = [
             "schtasks",
@@ -746,6 +816,41 @@ def _dispatch(action: str, *args, **kwargs):
     return funcs[action](*args, **kwargs)
 
 
+def _validate_install_input(pings: list[str], command: str, system: str) -> None:
+    """Check everything `install` was given, before anything is removed.
+
+    Two rules with two different scopes, which is why they are not one
+    validator (#6, #7):
+
+    * **The pings are checked on every platform.** A ping means the same thing
+      to launchd, cron and schtasks -- a wall-clock time -- so the shape is not
+      platform-dependent. Before #7 this was enforced only by the `int()` calls
+      inside `_split_hm`, and `_install_windows` never called it.
+
+    * **The command is checked per platform, because "valid" differs**, and it
+      differs in both directions -- which is why hoisting one validator to all
+      three would be wrong rather than merely redundant:
+
+      - Linux (`_validate_cron_command`): no newline, carriage return or bare
+        `%`. A crontab entry is one line, and cron rewrites an unescaped `%`
+        to a newline. A newline and a `%` are both harmless on launchd.
+      - macOS (`_validate_plist_command`): no C0 control character other than
+        tab and newline, and valid UTF-8. A plist is XML, which cannot carry
+        one; a carriage return it *can* carry is normalised to a newline on
+        read, so the command launchd runs would differ from the one typed.
+        Every one of those is harmless on a crontab line.
+      - Windows: no rule. `schtasks /tr` applies its own quoting to
+        `cmd /c <command>`, and that has not been measured on Windows; an
+        unverified rule would be worse than a stated gap. See #7.
+    """
+    for ping in pings:
+        _validate_ping(ping)
+    if system == "Linux":
+        _validate_cron_command(command)
+    elif system == "Darwin":
+        _validate_plist_command(command)
+
+
 def _crontab_force_kwargs(args: argparse.Namespace) -> dict:
     """--force-replace-crontab is a cron-only override; other schedulers never see it."""
     if platform.system() != "Linux":
@@ -768,16 +873,13 @@ def cmd_install(args: argparse.Namespace) -> int:
     command = args.command
     weekdays_only = args.weekdays
 
-    # Gate the command before the uninstall pass runs: on Linux a command that
-    # cannot be written to a crontab line must not cost the user their existing
-    # entries on the way to a refusal. The rule is cron's, so it is applied on
-    # the platform whose scheduler is cron.
-    if platform.system() == "Linux":
-        try:
-            _validate_cron_command(command)
-        except ValueError as exc:
-            print(f"window-spread: {exc}", file=sys.stderr)
-            return 2
+    # Everything below the uninstall pass is destructive, so every check runs
+    # above it: a refusal must not cost the user the entries they already had.
+    try:
+        _validate_install_input(pings, command, platform.system())
+    except ValueError as exc:
+        print(f"window-spread: {exc}", file=sys.stderr)
+        return 2
 
     kwargs = _crontab_force_kwargs(args)
     removed = _dispatch("uninstall", args.dry_run, **kwargs)

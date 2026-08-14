@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import sys
 import unittest
 from io import StringIO
@@ -1058,6 +1059,310 @@ class ErrorPathsTest(unittest.TestCase):
             self.assertEqual(read.state, ws.CRONTAB_EMPTY)
             self.assertEqual(read.lines, [])
             self.assertTrue(read.usable)
+
+
+# ---------- #6: the plist is a document, not a string ------------------------
+
+
+class MacOSPlistEncodingTest(unittest.TestCase):
+    """A plist must encode whatever the command contains, not interpolate it.
+
+    Every case here asserts on the *parsed* document via plistlib, so a test
+    that stopped generating a plist at all would fail on the load rather than
+    pass on an absent substring.
+    """
+
+    KEYS = {
+        "Label",
+        "ProgramArguments",
+        "StartCalendarInterval",
+        "StandardOutPath",
+        "StandardErrorPath",
+    }
+
+    def _load(self, command="claude -p hi", label="com.dpt.window-spread.0630"):
+        return plistlib.loads(
+            ws._macos_plist(label, command, 6, 30, False).encode("utf-8")
+        )
+
+    def test_ordinary_command_round_trips(self):
+        # positive control: the fixture does produce a loadable plist with the
+        # exact command in it, so a failure below is about the command's
+        # content and not about the harness.
+        doc = self._load("claude -p hi")
+        self.assertEqual(set(doc.keys()), self.KEYS)
+        self.assertEqual(doc["ProgramArguments"], ["/bin/bash", "-lc", "claude -p hi"])
+
+    def test_ampersand_command_round_trips(self):
+        cmd = "claude -p 'a & b'"
+        doc = self._load(cmd)
+        self.assertEqual(doc["ProgramArguments"][2], cmd)
+
+    def test_angle_bracket_redirect_round_trips(self):
+        cmd = "claude -p hi > /tmp/out 2>&1 < /dev/null"
+        self.assertEqual(self._load(cmd)["ProgramArguments"][2], cmd)
+
+    def test_markup_in_command_injects_no_keys(self):
+        # The full injection: it closes <string> *and* the ProgramArguments
+        # <array>, so it lands in the top-level dict where launchd reads it.
+        inj = (
+            "claude</string></array><key>RunAtLoad</key><true/>"
+            "<key>ProgramArguments</key><array><string>evil"
+        )
+        doc = self._load(inj)
+        # positive control, same fixture: a document was generated and the
+        # command reached it verbatim. Without this line the assertions below
+        # would also pass on an empty dict.
+        self.assertEqual(doc["ProgramArguments"], ["/bin/bash", "-lc", inj])
+        self.assertEqual(set(doc.keys()), self.KEYS)
+        self.assertNotIn("RunAtLoad", doc)
+
+    def test_markup_in_label_injects_no_keys(self):
+        inj = "L</string><key>RunAtLoad</key><true/><string>"
+        doc = self._load(label=inj)
+        self.assertEqual(doc["Label"], inj)  # positive control
+        self.assertEqual(set(doc.keys()), self.KEYS)
+        self.assertNotIn("RunAtLoad", doc)
+
+    def test_newline_and_percent_are_fine_on_launchd(self):
+        # Why cron's _validate_cron_command is NOT hoisted to every platform:
+        # both characters launchd is indifferent to round-trip exactly. A
+        # shared validator would refuse input that works here.
+        for cmd in ("a\nb", "pct 100% done", "a\tb"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self._load(cmd)["ProgramArguments"][2], cmd)
+
+    def test_control_character_is_refused_by_name(self):
+        # macOS is not "no command rule": an XML plist cannot carry a C0
+        # control character other than tab/LF/CR, and a lone surrogate does
+        # not encode. Without an explicit check these surface as a raw
+        # plistlib ValueError / UnicodeEncodeError from inside the installer,
+        # which on the install path is *after* the destructive uninstall pass.
+        for cmd in ("a\x00b", "a\x01b", "a\x1bb", "a\x1fb"):
+            with self.subTest(cmd=cmd):
+                with self.assertRaises(ValueError) as ctx:
+                    ws._validate_plist_command(cmd)
+                self.assertIn("control character", str(ctx.exception))
+
+    def test_carriage_return_is_refused_because_it_does_not_survive(self):
+        # A CR is legal in an XML document and plistlib will happily write
+        # one, but every XML parser normalises it to LF on the way back --
+        # so launchd would run a command the user did not type. Silent
+        # corruption is worse than a refusal.
+        with self.assertRaises(ValueError):
+            ws._validate_plist_command("a\rb")
+
+    def test_carriage_return_really_does_not_round_trip(self):
+        # the measurement the refusal above is built on, pinned so that a
+        # future plistlib change is visible rather than assumed.
+        doc = plistlib.loads(plistlib.dumps({"k": "a\rb"}))
+        self.assertEqual(doc["k"], "a\nb")
+
+    def test_undecodable_argv_byte_is_refused(self):
+        # POSIX argv that is not valid UTF-8 reaches us as a lone surrogate.
+        with self.assertRaises(ValueError):
+            ws._validate_plist_command("claude \udcff")
+
+    def test_plist_command_validator_accepts_ordinary_commands(self):
+        # positive control for the two refusals above.
+        for cmd in ("claude -p hi", "claude -p 'a && b' > /tmp/o", "100% \t\n", "é"):
+            with self.subTest(cmd=cmd):
+                ws._validate_plist_command(cmd)
+
+    def test_macos_plist_refuses_control_character_at_point_of_use(self):
+        # our message, not plistlib's: the point is that the refusal is a
+        # stated rule of this tool and not a serialiser accident.
+        with self.assertRaises(ValueError) as ctx:
+            ws._macos_plist("L", "a\x01b", 6, 30, False)
+        self.assertIn("control character", str(ctx.exception))
+
+    def test_calendar_interval_daily(self):
+        doc = plistlib.loads(ws._macos_plist("L", "c", 6, 30, False).encode("utf-8"))
+        self.assertEqual(doc["StartCalendarInterval"], {"Hour": 6, "Minute": 30})
+
+    def test_calendar_interval_weekdays(self):
+        doc = plistlib.loads(ws._macos_plist("L", "c", 6, 30, True).encode("utf-8"))
+        self.assertEqual(
+            doc["StartCalendarInterval"],
+            [{"Hour": 6, "Minute": 30, "Weekday": wd} for wd in (1, 2, 3, 4, 5)],
+        )
+
+
+class MacOSInstallOrderingTest(unittest.TestCase):
+    """A failed load must not cost the user the job they already had (#6)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        (self.home / "Library/LaunchAgents").mkdir(parents=True)
+        self.plist_path = (
+            self.home / "Library/LaunchAgents/com.dpt.window-spread.0630.plist"
+        )
+        self.previous = b"<?xml version='1.0'?><plist version='1.0'><dict/></plist>\n"
+        self.plist_path.write_bytes(self.previous)
+        patcher = patch.object(ws.Path, "home", return_value=self.home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, load_returncode):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            record = list(cmd)
+            rc = 0
+            if cmd[1] == "load":
+                # snapshot what is on disk at the moment load is attempted
+                record.append(("disk", self.plist_path.read_bytes()))
+                rc = load_returncode
+            calls.append(record)
+            return MagicMock(returncode=rc, stdout="", stderr="boom" if rc else "")
+
+        with patch.object(ws.subprocess, "run", side_effect=fake_run):
+            results = ws._install_macos(
+                ["06:30"], "claude -p hi", weekdays_only=False, dry_run=False
+            )
+        return results, calls
+
+    def test_failed_load_restores_previous_plist(self):
+        results, calls = self._run(load_returncode=1)
+        self.assertEqual(results[0]["returncode"], 1)
+        self.assertEqual(
+            self.plist_path.read_bytes(),
+            self.previous,
+            "a load failure left the user's previous plist overwritten",
+        )
+        # the restored job must be handed back to launchd, not just to disk
+        loads = [c for c in calls if c[1] == "load"]
+        self.assertEqual(len(loads), 2, "the previous job was never reloaded")
+
+    def test_successful_load_keeps_new_plist(self):
+        # positive control for the assertion above: on success the new
+        # document is on disk, so "previous content survived" is a real
+        # statement about the failure path and not about a no-op installer.
+        results, calls = self._run(load_returncode=0)
+        self.assertEqual(results[0]["returncode"], 0)
+        doc = plistlib.loads(self.plist_path.read_bytes())
+        self.assertEqual(doc["ProgramArguments"][2], "claude -p hi")
+        self.assertEqual(len([c for c in calls if c[1] == "load"]), 1)
+
+    def test_new_plist_is_on_disk_when_load_is_attempted(self):
+        _, calls = self._run(load_returncode=0)
+        snapshot = [c[-1][1] for c in calls if c[1] == "load"][0]
+        self.assertEqual(plistlib.loads(snapshot)["ProgramArguments"][2], "claude -p hi")
+
+
+# ---------- #7: ping values are validated on every platform ------------------
+
+
+class ValidatePingTest(unittest.TestCase):
+    def test_accepts_ordinary_ping(self):
+        for good in ("06:30", "00:00", "23:59"):
+            with self.subTest(good=good):
+                ws._validate_ping(good)  # positive control: must not raise
+
+    def test_rejects_non_time(self):
+        for bad in ("not-a-time", "", "0630", "6:30", "06:3", "06:30:00", "aa:bb"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    ws._validate_ping(bad)
+
+    def test_rejects_out_of_range(self):
+        for bad in ("24:00", "99:00", "06:60"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    ws._validate_ping(bad)
+
+    def test_rejects_path_and_flag_shapes(self):
+        for bad in ("../../etc/passwd", "/f", "06:30 /f"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    ws._validate_ping(bad)
+
+
+class WindowsPingValidationTest(unittest.TestCase):
+    def test_install_windows_refuses_unvalidated_ping(self):
+        with self.assertRaises(ValueError):
+            ws._install_windows(["not-a-time"], "x", weekdays_only=False, dry_run=True)
+
+    def test_install_windows_accepts_a_real_ping(self):
+        # positive control: the refusal above is about the ping, not about
+        # _install_windows having stopped working.
+        cmd = ws._install_windows(["06:30"], "x", weekdays_only=False, dry_run=True)[0][
+            "cmd"
+        ]
+        self.assertEqual(cmd[cmd.index("/st") + 1], "06:30")
+
+
+class CmdInstallValidationTest(unittest.TestCase):
+    """Validation happens in cmd_install, before the destructive uninstall."""
+
+    def _install(self, pings, system, command="claude -p hi"):
+        payload = json.dumps({"spread": {"pings": pings}})
+        with patch.object(ws.platform, "system", return_value=system):
+            with patch("sys.stdin", StringIO(payload)):
+                with patch.object(ws, "_dispatch") as mock_dispatch:
+                    mock_dispatch.return_value = [{"returncode": 0}] * len(pings)
+                    out, err = StringIO(), StringIO()
+                    with patch("sys.stdout", out), patch("sys.stderr", err):
+                        rc = ws.main(["install", "-", "--dry-run", "--command", command])
+                    return rc, mock_dispatch, err.getvalue()
+
+    def test_bad_ping_refused_before_dispatch_on_every_platform(self):
+        for system in ("Darwin", "Linux", "Windows"):
+            with self.subTest(system=system):
+                rc, dispatch, err = self._install(["not-a-time"], system)
+                self.assertEqual(rc, 2)
+                # the point of the issue: nothing was uninstalled on the way
+                # to the refusal.
+                dispatch.assert_not_called()
+                self.assertIn("not-a-time", err)
+
+    def test_good_ping_dispatches_on_every_platform(self):
+        # positive control for the whole class: without it, "dispatch was not
+        # called" would also pass if main() had stopped dispatching at all.
+        for system in ("Darwin", "Linux", "Windows"):
+            with self.subTest(system=system):
+                rc, dispatch, _ = self._install(["06:30"], system)
+                self.assertEqual(rc, 0)
+                self.assertEqual(dispatch.call_count, 2)  # uninstall + install
+
+    def test_newline_command_refused_on_linux_only(self):
+        # The command rule is cron's, and stays cron's: the same command is
+        # legal on launchd (see MacOSPlistEncodingTest) and is not adjudicated
+        # for schtasks. Linux is the positive control for the macOS case.
+        rc, dispatch, err = self._install(["06:30"], "Linux", command="a\nb")
+        self.assertEqual(rc, 2)
+        dispatch.assert_not_called()
+        self.assertIn("newline", err)
+
+        rc, dispatch, _ = self._install(["06:30"], "Darwin", command="a\nb")
+        self.assertEqual(rc, 0)
+        self.assertEqual(dispatch.call_count, 2)
+
+    def test_control_character_command_refused_on_macos_before_dispatch(self):
+        # The macOS rule is plist's, not cron's, and it must be applied above
+        # the destructive uninstall pass for the same reason cron's is: a
+        # plistlib ValueError raised inside _install_macos would land *after*
+        # every existing ping had been removed.
+        rc, dispatch, err = self._install(["06:30"], "Darwin", command="claude\x01hi")
+        self.assertEqual(rc, 2)
+        dispatch.assert_not_called()
+        self.assertIn("control character", err)
+
+    def test_ordinary_command_still_dispatches_on_macos(self):
+        # positive control for the refusal above.
+        rc, dispatch, _ = self._install(["06:30"], "Darwin", command="claude -p hi")
+        self.assertEqual(rc, 0)
+        self.assertEqual(dispatch.call_count, 2)
+
+    def test_control_character_not_refused_on_linux(self):
+        # The mirror of the newline case: \x01 is illegal in a plist and
+        # legal on a crontab line, so the plist rule is not shared either.
+        # Both directions of "valid is not one thing" are pinned.
+        rc, dispatch, _ = self._install(["06:30"], "Linux", command="claude\x01hi")
+        self.assertEqual(rc, 0, "Linux does not impose the plist rule")
+        self.assertEqual(dispatch.call_count, 2)
 
 
 if __name__ == "__main__":
