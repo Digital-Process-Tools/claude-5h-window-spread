@@ -135,6 +135,34 @@ Lists installed pings with next fire times.
 
 Re-run `/window-spread setup` with a different work pattern. Install is destructive-replace — old pings are removed before new ones are written.
 
+### On Linux: what happens to the rest of your crontab
+
+Install and uninstall rewrite your whole crontab, so they read it first and keep
+everything that is not a window-spread entry. If that read fails — a permissions
+problem on the cron spool, a home directory that is not mounted, no `crontab`
+binary on `PATH` — **nothing is written**. The command reports what it could not
+read and exits non-zero, rather than replacing your crontab with only its own
+lines.
+
+A user with genuinely no crontab yet is not that case: `crontab -l` says
+`no crontab for <user>` there, and install proceeds normally.
+
+If you are certain the crontab is empty and want to install anyway:
+
+```bash
+python3 scripts/window-spread.py install pings.json --force-replace-crontab
+```
+
+That flag **discards whatever is in the crontab**. There is no backup.
+
+### On Linux: what `--command` may contain
+
+A crontab entry is a single line, and cron treats an unescaped `%` as a newline.
+A `--command` containing a newline, a carriage return or a bare `%` is refused
+before anything is written — otherwise it would split into a second entry that
+runs on its own schedule and that `uninstall` cannot see. Write `\%` for a
+literal percent sign.
+
 ---
 
 ## How it works

@@ -71,6 +71,10 @@ Get the user from "I keep hitting cap" to "I have 4 pings scheduled" in under 90
 
    Install is **destructive-replace**: it removes all existing window-spread entries first, then installs the new ones. Re-running setup with different blocks won't accumulate stale pings.
 
+   On Linux it rewrites the whole crontab, so it reads the existing one first and keeps every entry that is not ours. If that read fails, install **refuses** and exits non-zero with `"error": "crontab-unreadable"` — report that to the user verbatim. Do **not** re-run with `--force-replace-crontab` to make the error go away: that flag discards whatever is in their crontab, and it is theirs to choose.
+
+   Never pass a `--command` containing a newline or a bare `%`; on Linux the script refuses both, because either one splits the cron line into a second entry that uninstall cannot find.
+
 7. **Confirm done.** "Installed. Next ping fires <next time>. Run `/window-spread status` to verify."
 
 ### `/window-spread status`

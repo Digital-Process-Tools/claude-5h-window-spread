@@ -354,7 +354,8 @@ class LinuxCronTest(unittest.TestCase):
             "0 9 * * 1 /home/user/backup.sh",
             "30 10 * * * claude -p hi # com.dpt.window-spread.1030",  # stale
         ]
-        with patch.object(ws, "_read_crontab", return_value=existing):
+        read = ws.CrontabRead(ws.CRONTAB_OK, existing)
+        with patch.object(ws, "_read_crontab", return_value=read):
             with patch.object(ws, "_write_crontab") as mock_write:
                 mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
                 ws._install_linux(["06:30"], "claude -p hi", weekdays_only=True, dry_run=False)
@@ -372,7 +373,8 @@ class LinuxCronTest(unittest.TestCase):
             "30 6 * * 1-5 claude -p hi # com.dpt.window-spread.0630",
             "30 11 * * 1-5 claude -p hi # com.dpt.window-spread.1130",
         ]
-        with patch.object(ws, "_read_crontab", return_value=existing):
+        read = ws.CrontabRead(ws.CRONTAB_OK, existing)
+        with patch.object(ws, "_read_crontab", return_value=read):
             with patch.object(ws, "_write_crontab") as mock_write:
                 mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
                 results = ws._uninstall_linux(dry_run=False)
@@ -383,10 +385,350 @@ class LinuxCronTest(unittest.TestCase):
 
     def test_dry_run_does_not_write(self):
         existing = ["30 6 * * 1-5 claude -p hi # com.dpt.window-spread.0630"]
-        with patch.object(ws, "_read_crontab", return_value=existing):
+        read = ws.CrontabRead(ws.CRONTAB_OK, existing)
+        with patch.object(ws, "_read_crontab", return_value=read):
             with patch.object(ws, "_write_crontab") as mock_write:
                 ws._uninstall_linux(dry_run=True)
                 mock_write.assert_not_called()
+
+
+class CrontabReadStateTest(unittest.TestCase):
+    """_read_crontab must distinguish "no crontab" from "cannot read one" (#4)."""
+
+    def _read_with(self, **proc):
+        proc.setdefault("stdout", "")
+        proc.setdefault("stderr", "")
+        with patch.object(ws.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(**proc)
+            return ws._read_crontab()
+
+    def test_success_returns_lines(self):
+        read = self._read_with(returncode=0, stdout="0 9 * * 1 backup.sh\n# note\n")
+        self.assertEqual(read.state, ws.CRONTAB_OK)
+        self.assertEqual(read.lines, ["0 9 * * 1 backup.sh", "# note"])
+        self.assertTrue(read.usable)
+
+    def test_no_crontab_for_user_is_empty(self):
+        # vixie-cron / cronie / macOS all say this; observed on macOS.
+        read = self._read_with(returncode=1, stderr="crontab: no crontab for jane")
+        self.assertEqual(read.state, ws.CRONTAB_EMPTY)
+        self.assertEqual(read.lines, [])
+        self.assertTrue(read.usable)
+
+    def test_enoent_on_the_spool_is_empty(self):
+        # busybox reports a missing crontab as ENOENT on the spool path.
+        # REASONED, not observed: this wording is from busybox's error format,
+        # not from a run against a real busybox crontab.
+        read = self._read_with(
+            returncode=1,
+            stderr="crontab: can't open '/var/spool/cron/crontabs/jane': No such file or directory",
+        )
+        self.assertEqual(read.state, ws.CRONTAB_EMPTY)
+
+    def test_enoent_away_from_the_spool_is_unreadable(self):
+        # A crontab that cannot even start says ENOENT about something else
+        # entirely. The crontab it could not read may be full of the user's
+        # jobs, so this must not read as "there is nothing there".
+        read = self._read_with(
+            returncode=1,
+            stderr=(
+                "crontab: error while loading shared libraries: libpam.so.0: "
+                "cannot open shared object file: No such file or directory"
+            ),
+        )
+        self.assertEqual(read.state, ws.CRONTAB_UNREADABLE)
+
+    def test_permission_denied_is_unreadable(self):
+        read = self._read_with(
+            returncode=1,
+            stderr="crontab: cannot read /var/spool/cron/crontabs/jane: Permission denied",
+        )
+        self.assertEqual(read.state, ws.CRONTAB_UNREADABLE)
+        self.assertFalse(read.usable)
+
+    def test_denial_wins_over_an_enoent_substring(self):
+        # A message carrying both shapes must never be read as "empty".
+        read = self._read_with(
+            returncode=1,
+            stderr="crontab: no such file or directory for spool; Permission denied",
+        )
+        self.assertEqual(read.state, ws.CRONTAB_UNREADABLE)
+
+    def test_silent_failure_is_unreadable(self):
+        # An unrecognised failure is not evidence that there is nothing there.
+        read = self._read_with(returncode=1, stderr="")
+        self.assertEqual(read.state, ws.CRONTAB_UNREADABLE)
+
+    def test_missing_crontab_binary_is_unreadable(self):
+        with patch.object(ws.subprocess, "run", side_effect=FileNotFoundError("crontab")):
+            read = ws._read_crontab()
+        self.assertEqual(read.state, ws.CRONTAB_UNREADABLE)
+        self.assertIn("crontab", read.stderr)
+
+
+class CrontabRefusesToOverwriteTest(unittest.TestCase):
+    """An install/uninstall that cannot read the crontab must not write one (#4)."""
+
+    def setUp(self):
+        self.unreadable = ws.CrontabRead(
+            ws.CRONTAB_UNREADABLE, [], "crontab: cannot read spool: Permission denied"
+        )
+        self.empty = ws.CrontabRead(ws.CRONTAB_EMPTY, [])
+        self.populated = ws.CrontabRead(
+            ws.CRONTAB_OK,
+            [
+                "0 9 * * 1 /home/jane/backup.sh",
+                "30 6 * * * claude -p hi # com.dpt.window-spread.0630",
+            ],
+        )
+
+    def _run(self, action, read, **kwargs):
+        with patch.object(ws, "_read_crontab", return_value=read):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+                with patch("sys.stderr", StringIO()):
+                    results = action(**kwargs)
+        return results, mock_write
+
+    def test_install_refuses_when_crontab_unreadable(self):
+        results, mock_write = self._run(
+            ws._install_linux,
+            self.unreadable,
+            pings=["06:30"],
+            command="claude -p hi",
+            weekdays_only=False,
+            dry_run=False,
+        )
+        mock_write.assert_not_called()
+        self.assertTrue(any(r.get("returncode", 0) != 0 for r in results))
+        self.assertTrue(any("Permission denied" in str(r.get("stderr", "")) for r in results))
+
+    def test_install_writes_when_crontab_is_genuinely_empty(self):
+        # positive control for the refusal above
+        results, mock_write = self._run(
+            ws._install_linux,
+            self.empty,
+            pings=["06:30"],
+            command="claude -p hi",
+            weekdays_only=False,
+            dry_run=False,
+        )
+        mock_write.assert_called_once()
+        self.assertEqual(
+            mock_write.call_args[0][0],
+            ["30 6 * * * claude -p hi # com.dpt.window-spread.0630"],
+        )
+        self.assertTrue(all(r.get("returncode", 0) == 0 for r in results))
+
+    def test_install_force_overrides_the_refusal(self):
+        _, mock_write = self._run(
+            ws._install_linux,
+            self.unreadable,
+            pings=["06:30"],
+            command="claude -p hi",
+            weekdays_only=False,
+            dry_run=False,
+            force=True,
+        )
+        mock_write.assert_called_once()
+
+    def test_install_dry_run_never_writes_even_when_unreadable(self):
+        results, mock_write = self._run(
+            ws._install_linux,
+            self.unreadable,
+            pings=["06:30"],
+            command="claude -p hi",
+            weekdays_only=False,
+            dry_run=True,
+        )
+        mock_write.assert_not_called()
+        self.assertTrue(any(r.get("returncode", 0) != 0 for r in results))
+
+    def test_uninstall_refuses_when_crontab_unreadable(self):
+        results, mock_write = self._run(ws._uninstall_linux, self.unreadable, dry_run=False)
+        mock_write.assert_not_called()
+        self.assertTrue(any(r.get("returncode", 0) != 0 for r in results))
+
+    def test_uninstall_writes_when_crontab_readable(self):
+        # positive control for the refusal above
+        results, mock_write = self._run(ws._uninstall_linux, self.populated, dry_run=False)
+        mock_write.assert_called_once()
+        self.assertEqual(mock_write.call_args[0][0], ["0 9 * * 1 /home/jane/backup.sh"])
+        self.assertEqual(len(results), 1)
+
+    def test_uninstall_force_reports_nothing_to_remove_rather_than_refusing(self):
+        results, mock_write = self._run(
+            ws._uninstall_linux, self.unreadable, dry_run=False, force=True
+        )
+        # Forced, so no refusal entry -- and the read produced no lines
+        # carrying our marker, so there is nothing to remove and nothing is
+        # written. The empty list is what distinguishes this from the refusal;
+        # mock_write is silent on both paths.
+        self.assertEqual(results, [])
+        mock_write.assert_not_called()
+
+    def test_uninstall_reports_a_failed_rewrite_as_not_removed(self):
+        with patch.object(ws, "_read_crontab", return_value=self.populated):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                mock_write.return_value = type(
+                    "R", (), {"returncode": 1, "stderr": "crontab: errors in crontab file"}
+                )()
+                results = ws._uninstall_linux(dry_run=False)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["removed"])
+        self.assertEqual(results[0]["returncode"], 1)
+
+    def test_list_is_empty_but_says_so_on_stderr(self):
+        err = StringIO()
+        with patch.object(ws, "_read_crontab", return_value=self.unreadable):
+            with patch("sys.stderr", err):
+                self.assertEqual(ws._list_linux(), [])
+        self.assertIn("could not", err.getvalue().lower())
+
+    def test_list_returns_entries_when_readable(self):
+        # positive control for the stderr warning above
+        err = StringIO()
+        with patch.object(ws, "_read_crontab", return_value=self.populated):
+            with patch("sys.stderr", err):
+                entries = ws._list_linux()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(err.getvalue(), "")
+
+
+class CronCommandValidationTest(unittest.TestCase):
+    """A command that would split the cron line is refused before any write (#5)."""
+
+    def test_newline_in_command_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            ws._cron_line("06:30", "claude -p hi\n0 0 * * * /tmp/evil.sh", weekdays_only=False)
+        self.assertIn("newline", str(ctx.exception))
+
+    def test_carriage_return_in_command_is_refused(self):
+        with self.assertRaises(ValueError):
+            ws._cron_line("06:30", "claude -p hi\r0 0 * * * /tmp/evil.sh", weekdays_only=False)
+
+    def test_bare_percent_in_command_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            ws._cron_line("06:30", 'claude -p "50% done"', weekdays_only=False)
+        self.assertIn("%", str(ctx.exception))
+
+    def test_escaped_percent_is_allowed(self):
+        line = ws._cron_line("06:30", r'claude -p "50\% done"', weekdays_only=False)
+        self.assertTrue(line.endswith("# com.dpt.window-spread.0630"))
+
+    def test_ordinary_command_still_builds(self):
+        # positive control for the three refusals above
+        line = ws._cron_line("06:30", ws.DEFAULT_COMMAND, weekdays_only=False)
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertTrue(line.endswith("# com.dpt.window-spread.0630"))
+
+    def test_marker_labels_the_line_it_is_on(self):
+        # the harm in #5 was a marker that ended up on a different line than
+        # the ping it labelled; with the command validated it cannot.
+        line = ws._cron_line("06:30", ws.DEFAULT_COMMAND, weekdays_only=False)
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertIn(ws.LABEL_PREFIX, line)
+
+    def test_uninstall_removes_a_line_this_version_installs(self):
+        # round trip: whatever _cron_line emits, _uninstall_linux must find.
+        line = ws._cron_line("06:30", ws.DEFAULT_COMMAND, weekdays_only=True)
+        read = ws.CrontabRead(ws.CRONTAB_OK, ["0 9 * * 1 backup.sh", line])
+        with patch.object(ws, "_read_crontab", return_value=read):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+                results = ws._uninstall_linux(dry_run=False)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(mock_write.call_args[0][0], ["0 9 * * 1 backup.sh"])
+
+    def test_uninstall_still_removes_a_pre_fix_marker_line(self):
+        # the on-disk format did not change, so entries written by an older
+        # version are still found by uninstall
+        legacy = "30 6 * * 1-5 claude -p hi # com.dpt.window-spread.0630"
+        read = ws.CrontabRead(ws.CRONTAB_OK, [legacy])
+        with patch.object(ws, "_read_crontab", return_value=read):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+                results = ws._uninstall_linux(dry_run=False)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(mock_write.call_args[0][0], [])
+
+    def test_install_linux_refuses_a_newline_command_without_writing(self):
+        read = ws.CrontabRead(ws.CRONTAB_OK, ["0 9 * * 1 backup.sh"])
+        with patch.object(ws, "_read_crontab", return_value=read):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                with self.assertRaises(ValueError):
+                    ws._install_linux(
+                        ["06:30"],
+                        "claude -p hi\n0 0 * * * /tmp/evil.sh",
+                        weekdays_only=False,
+                        dry_run=False,
+                    )
+                mock_write.assert_not_called()
+
+    def test_install_linux_writes_an_ordinary_command(self):
+        # positive control for the refusal above, same fixture
+        read = ws.CrontabRead(ws.CRONTAB_OK, ["0 9 * * 1 backup.sh"])
+        with patch.object(ws, "_read_crontab", return_value=read):
+            with patch.object(ws, "_write_crontab") as mock_write:
+                mock_write.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+                ws._install_linux(["06:30"], "claude -p hi", weekdays_only=False, dry_run=False)
+                mock_write.assert_called_once()
+
+    def test_dry_run_also_refuses_a_newline_command(self):
+        read = ws.CrontabRead(ws.CRONTAB_OK, [])
+        with patch.object(ws, "_read_crontab", return_value=read):
+            with self.assertRaises(ValueError):
+                ws._install_linux(["06:30"], "a\nb", weekdays_only=False, dry_run=True)
+
+
+class CmdInstallCommandGateTest(unittest.TestCase):
+    """cmd_install rejects the command before the uninstall pass runs (#5)."""
+
+    def _main(self, command):
+        payload = json.dumps({"pings": ["06:30"]})
+        err = StringIO()
+        with patch.object(ws.platform, "system", return_value="Linux"):
+            with patch("sys.stdin", StringIO(payload)):
+                with patch.object(ws, "_dispatch") as mock_dispatch:
+                    mock_dispatch.return_value = [{"returncode": 0}]
+                    with patch("sys.stdout", StringIO()):
+                        with patch("sys.stderr", err):
+                            rc = ws.main(["install", "-", "--command", command])
+        return rc, mock_dispatch, err.getvalue()
+
+    def test_newline_command_never_reaches_the_scheduler(self):
+        rc, mock_dispatch, err = self._main("claude -p hi\n0 0 * * * /tmp/evil.sh")
+        self.assertNotEqual(rc, 0)
+        mock_dispatch.assert_not_called()
+        self.assertIn("newline", err)
+
+    def test_ordinary_command_reaches_the_scheduler(self):
+        # positive control: the gate above is not simply blocking everything
+        rc, mock_dispatch, err = self._main("claude -p hi")
+        self.assertEqual(rc, 0)
+        self.assertEqual(mock_dispatch.call_count, 2)
+
+
+class CmdUninstallExitCodeTest(unittest.TestCase):
+    """A refused uninstall must not exit 0 (#4)."""
+
+    def _main(self, results):
+        with patch.object(ws.platform, "system", return_value="Linux"):
+            with patch.object(ws, "_dispatch", return_value=results):
+                with patch("sys.stdout", StringIO()):
+                    return ws.main(["uninstall"])
+
+    def test_refusal_exits_non_zero(self):
+        self.assertNotEqual(
+            self._main([{"error": "crontab-unreadable", "returncode": 1, "stderr": "denied"}]), 0
+        )
+
+    def test_successful_removal_exits_zero(self):
+        # positive control for the refusal above
+        self.assertEqual(self._main([{"line": "x", "removed": True, "returncode": 0}]), 0)
+
+    def test_nothing_to_remove_exits_zero(self):
+        self.assertEqual(self._main([]), 0)
 
 
 class WindowsSchtasksTest(unittest.TestCase):
@@ -705,9 +1047,17 @@ class ErrorPathsTest(unittest.TestCase):
                 self.assertEqual(mock_dispatch.call_args[0][1], ["06:30"])
 
     def test_read_crontab_no_existing(self):
+        # "no crontab for <user>" is the recognised quiet case: empty, usable,
+        # and safe to write over. An unrecognised failure is NOT this case --
+        # see CrontabReadStateTest.test_silent_failure_is_unreadable.
         with patch.object(ws.subprocess, "run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="no crontab")
-            self.assertEqual(ws._read_crontab(), [])
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="", stderr="crontab: no crontab for jane"
+            )
+            read = ws._read_crontab()
+            self.assertEqual(read.state, ws.CRONTAB_EMPTY)
+            self.assertEqual(read.lines, [])
+            self.assertTrue(read.usable)
 
 
 if __name__ == "__main__":

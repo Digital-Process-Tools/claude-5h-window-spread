@@ -424,28 +424,165 @@ def _list_macos() -> list[dict]:
 # ---- Linux cron -------------------------------------------------------------
 
 
+def _validate_cron_command(command: str) -> None:
+    """Refuse a command that would not survive being written to a crontab line.
+
+    A crontab entry is one line, so an embedded newline does not produce a
+    broken entry -- it produces a second, valid, unmarked one, and the marker
+    comment then labels the wrong line (#5). cron also rewrites an unescaped
+    '%' into a newline and feeds the remainder to the job on stdin, which
+    truncates the command the same way without a newline ever being typed.
+    """
+    for ch, name in (("\n", "newline"), ("\r", "carriage return")):
+        if ch in command:
+            raise ValueError(
+                f"--command may not contain a {name}: it would split the crontab "
+                f"line into a second, unmarked entry"
+            )
+    # Deliberately conservative: a backslash consumes the character after it,
+    # so `\%` is accepted and `\\%` -- where whether the '%' is escaped depends
+    # on the cron implementation's own backslash handling -- is refused. A
+    # false refusal costs an error message; a false accept costs a truncated
+    # command and an orphan entry.
+    i = 0
+    while i < len(command):
+        if command[i] == "\\":
+            i += 2
+            continue
+        if command[i] == "%":
+            raise ValueError(
+                "--command may not contain a bare '%': cron rewrites it to a "
+                "newline and truncates the command. Escape it as \\% if it is "
+                "meant literally"
+            )
+        i += 1
+
+
 def _cron_line(ping: str, command: str, weekdays_only: bool) -> str:
-    """Return a single crontab line with a marker comment."""
+    """Return a single crontab line with a marker comment.
+
+    The marker is a trailing comment on the same line as the command it
+    labels. That is only safe because the command is validated first: the
+    orphan entries in #5 came from a command that split the line out from
+    under its own marker. Keeping the marker where it has always been means
+    entries written by older versions are still found by uninstall.
+    """
+    _validate_cron_command(command)
     hour, minute = _split_hm(ping)
     dow = "1-5" if weekdays_only else "*"
     return f"{minute} {hour} * * {dow} {command} # {_label(ping)}"
 
 
-def _read_crontab() -> list[str]:
-    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    if proc.returncode != 0:
-        # no crontab yet — empty
-        return []
-    return proc.stdout.splitlines()
+# _read_crontab states. "empty" and "unreadable" are both a non-zero
+# `crontab -l`, and collapsing them is what let an install overwrite an
+# entire crontab (#4).
+CRONTAB_OK = "ok"
+CRONTAB_EMPTY = "empty"
+CRONTAB_UNREADABLE = "unreadable"
+
+# Markers that mean "the crontab exists and I was not allowed to read it".
+# Checked first: a message carrying both shapes must never read as empty.
+_CRONTAB_DENIED_MARKERS = (
+    "permission denied",
+    "operation not permitted",
+    "access is denied",
+    "not allowed to use",
+    "you are not authorized",
+)
+# Markers that mean "there is no crontab". vixie-cron, cronie and macOS all
+# print "no crontab for <user>". busybox reports the missing spool file as
+# ENOENT, which on its own is far too broad -- `crontab: error while loading
+# shared libraries: ...: No such file or directory` is a crontab that exists
+# and could not be read -- so ENOENT only counts when the message also names
+# the cron spool. Anything else, silent failures included, is unreadable.
+_CRONTAB_ABSENT_MARKERS = ("no crontab for",)
+_CRONTAB_ENOENT_MARKER = "no such file or directory"
+_CRONTAB_SPOOL_MARKER = "spool/cron"
+
+
+@dataclass(frozen=True)
+class CrontabRead:
+    """The outcome of `crontab -l`, in three states rather than two."""
+
+    state: str
+    lines: list[str]
+    stderr: str = ""
+
+    @property
+    def usable(self) -> bool:
+        """True when we know what is in the crontab and may replace it."""
+        return self.state in (CRONTAB_OK, CRONTAB_EMPTY)
+
+
+def _read_crontab() -> CrontabRead:
+    """Read the user's crontab, distinguishing "none" from "cannot read".
+
+    `crontab -l` exits non-zero both when there is no crontab and when there
+    is one it could not read. Only a recognised "no crontab" message is
+    treated as empty; every other failure is CRONTAB_UNREADABLE, because an
+    install that cannot establish what is already there has not learned that
+    nothing is there.
+    """
+    try:
+        proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    except OSError as exc:  # crontab not installed, not executable, ...
+        return CrontabRead(CRONTAB_UNREADABLE, [], f"could not run crontab: {exc}")
+    if proc.returncode == 0:
+        return CrontabRead(CRONTAB_OK, proc.stdout.splitlines(), (proc.stderr or "").strip())
+    stderr = (proc.stderr or "").strip()
+    low = stderr.lower()
+    if any(m in low for m in _CRONTAB_DENIED_MARKERS):
+        return CrontabRead(CRONTAB_UNREADABLE, [], stderr)
+    if any(m in low for m in _CRONTAB_ABSENT_MARKERS):
+        return CrontabRead(CRONTAB_EMPTY, [], stderr)
+    if _CRONTAB_ENOENT_MARKER in low and _CRONTAB_SPOOL_MARKER in low:
+        return CrontabRead(CRONTAB_EMPTY, [], stderr)
+    return CrontabRead(CRONTAB_UNREADABLE, [], stderr)
+
+
+def _unreadable_error(read: CrontabRead) -> dict:
+    return {
+        "error": "crontab-unreadable",
+        "returncode": 1,
+        "stderr": read.stderr or "crontab -l failed without a message",
+        "hint": "re-run with --force-replace-crontab to replace it anyway",
+    }
+
+
+def _warn_unreadable(action: str, read: CrontabRead) -> None:
+    print(
+        f"window-spread: could not read the existing crontab, so {action} was "
+        f"refused rather than risk replacing it: "
+        f"{read.stderr or 'crontab -l failed without a message'}",
+        file=sys.stderr,
+    )
 
 
 def _write_crontab(lines: list[str]) -> subprocess.CompletedProcess:
     content = "\n".join(lines) + "\n" if lines else ""
-    return subprocess.run(["crontab", "-"], input=content, capture_output=True, text=True)
+    try:
+        return subprocess.run(["crontab", "-"], input=content, capture_output=True, text=True)
+    except OSError as exc:
+        return subprocess.CompletedProcess(
+            ["crontab", "-"], 1, "", f"could not run crontab: {exc}"
+        )
 
 
-def _install_linux(pings: list[str], command: str, weekdays_only: bool, dry_run: bool) -> list[dict]:
-    existing = [l for l in _read_crontab() if LABEL_PREFIX not in l]
+def _install_linux(
+    pings: list[str],
+    command: str,
+    weekdays_only: bool,
+    dry_run: bool,
+    force: bool = False,
+) -> list[dict]:
+    # Validate before reading anything, so a bad command cannot reach a write
+    # under any code path, dry-run included.
+    _validate_cron_command(command)
+    read = _read_crontab()
+    if not read.usable and not force:
+        _warn_unreadable("install", read)
+        return [dict(_unreadable_error(read), ping=ping) for ping in pings]
+    existing = [l for l in read.lines if LABEL_PREFIX not in l]
     new_lines = [_cron_line(ping, command, weekdays_only) for ping in pings]
     final = existing + new_lines
     if dry_run:
@@ -462,19 +599,41 @@ def _install_linux(pings: list[str], command: str, weekdays_only: bool, dry_run:
     ]
 
 
-def _uninstall_linux(dry_run: bool) -> list[dict]:
-    existing = _read_crontab()
-    keep = [l for l in existing if LABEL_PREFIX not in l]
-    removed = [l for l in existing if LABEL_PREFIX in l]
+def _uninstall_linux(dry_run: bool, force: bool = False) -> list[dict]:
+    read = _read_crontab()
+    if not read.usable and not force:
+        _warn_unreadable("uninstall", read)
+        return [_unreadable_error(read)]
+    keep = [l for l in read.lines if LABEL_PREFIX not in l]
+    removed = [l for l in read.lines if LABEL_PREFIX in l]
     if dry_run:
         return [{"line": l, "dry_run": True} for l in removed]
-    if removed:
-        _write_crontab(keep)
-    return [{"line": l, "removed": True} for l in removed]
+    if not removed:
+        return []
+    proc = _write_crontab(keep)
+    # Report the write's own outcome: "removed" used to be True even when the
+    # rewrite failed and the entries were all still there.
+    return [
+        {
+            "line": l,
+            "removed": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stderr": proc.stderr.strip(),
+        }
+        for l in removed
+    ]
 
 
 def _list_linux() -> list[dict]:
-    return [{"line": l} for l in _read_crontab() if LABEL_PREFIX in l]
+    read = _read_crontab()
+    if not read.usable:
+        print(
+            f"window-spread: could not read the crontab, so this list may be "
+            f"incomplete: {read.stderr or 'crontab -l failed without a message'}",
+            file=sys.stderr,
+        )
+        return []
+    return [{"line": l} for l in read.lines if LABEL_PREFIX in l]
 
 
 # ---- Windows Task Scheduler -------------------------------------------------
@@ -587,6 +746,13 @@ def _dispatch(action: str, *args, **kwargs):
     return funcs[action](*args, **kwargs)
 
 
+def _crontab_force_kwargs(args: argparse.Namespace) -> dict:
+    """--force-replace-crontab is a cron-only override; other schedulers never see it."""
+    if platform.system() != "Linux":
+        return {}
+    return {"force": bool(getattr(args, "force_replace_crontab", False))}
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     """Install pings via the local OS scheduler (launchd / cron / Task Scheduler).
 
@@ -602,8 +768,20 @@ def cmd_install(args: argparse.Namespace) -> int:
     command = args.command
     weekdays_only = args.weekdays
 
-    removed = _dispatch("uninstall", args.dry_run)
-    installed = _dispatch("install", pings, command, weekdays_only, args.dry_run)
+    # Gate the command before the uninstall pass runs: on Linux a command that
+    # cannot be written to a crontab line must not cost the user their existing
+    # entries on the way to a refusal. The rule is cron's, so it is applied on
+    # the platform whose scheduler is cron.
+    if platform.system() == "Linux":
+        try:
+            _validate_cron_command(command)
+        except ValueError as exc:
+            print(f"window-spread: {exc}", file=sys.stderr)
+            return 2
+
+    kwargs = _crontab_force_kwargs(args)
+    removed = _dispatch("uninstall", args.dry_run, **kwargs)
+    installed = _dispatch("install", pings, command, weekdays_only, args.dry_run, **kwargs)
     json.dump(
         {"os": platform.system(), "removed": removed, "installed": installed},
         sys.stdout,
@@ -614,11 +792,17 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    """Remove all entries with our LABEL_PREFIX from the local OS scheduler."""
-    results = _dispatch("uninstall", args.dry_run)
+    """Remove all entries with our LABEL_PREFIX from the local OS scheduler.
+
+    Returns non-zero when a result reports one: on Linux that covers a crontab
+    that could not be read (refused rather than rewritten -- see
+    --force-replace-crontab) and a rewrite that failed. The macOS and Windows
+    paths do not yet report a returncode, so they still exit 0.
+    """
+    results = _dispatch("uninstall", args.dry_run, **_crontab_force_kwargs(args))
     json.dump({"os": platform.system(), "removed": results}, sys.stdout, indent=2)
     sys.stdout.write("\n")
-    return 0
+    return 0 if all(r.get("returncode", 0) == 0 for r in results) else 1
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -649,10 +833,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pi.add_argument("--weekdays", action="store_true", help="weekdays only (default: every day)")
     pi.add_argument("--dry-run", action="store_true", help="print commands without running")
+    pi.add_argument(
+        "--force-replace-crontab",
+        action="store_true",
+        help="Linux only: replace the crontab even though it could not be read "
+        "(this DISCARDS whatever is in it)",
+    )
     pi.set_defaults(func=cmd_install)
 
     pu = sub.add_parser("uninstall", help="remove all our entries from the OS scheduler")
     pu.add_argument("--dry-run", action="store_true", help="print what would be removed")
+    pu.add_argument(
+        "--force-replace-crontab",
+        action="store_true",
+        help="Linux only: rewrite the crontab even though it could not be read "
+        "(this DISCARDS whatever is in it)",
+    )
     pu.set_defaults(func=cmd_uninstall)
 
     pl = sub.add_parser("list", help="list installed window-spread entries")
