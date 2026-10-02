@@ -291,6 +291,12 @@ python3 scripts/window-spread.py compute --blocks "8:30-12:20,14:00-18:00,20:00-
 
 Outputs JSON. Pipe to `jq` for pretty-printing or to `python3 scripts/window-spread.py install -` to apply via claude-code-scheduler.
 
+### Releasing
+
+See [docs/releasing.md](docs/releasing.md) for the full sequence -- the slim `release`
+branch the Anthropic plugin directory reads, how it is built and checked, and the
+developer portal steps.
+
 ## License
 
 Source-available. Commercial redistribution prohibited. See [LICENSE](LICENSE).
