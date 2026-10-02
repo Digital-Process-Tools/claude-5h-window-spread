@@ -9,6 +9,21 @@ Entries are assembled from `changelog.d/` fragments at release time — see `.os
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-02
+
+### Added
+
+- Added a slim `release` branch for the Anthropic plugin directory (#12). A tag push
+  now builds a tree that keeps only what the plugin runs -- `README.md`, `LICENSE`,
+  `CODE_OF_CONDUCT.md`, `SECURITY.md`, `banner.png`, `.claude-plugin/plugin.json`,
+  `scripts/window-spread.py` and `skills/window-spread/SKILL.md`, cutting CHANGELOG.md
+  to its latest release and rewriting any link into a removed path -- checks it
+  against the directory's pre-submission checklist and a side-effect-free smoke test
+  (`claude plugin validate --strict` plus `window-spread.py --help`/`compute`, never
+  `install`/`uninstall`/`list`), and pushes it as one commit on `release` only if every
+  step passes. `.claude-plugin/plugin.json` now also carries `documentationUrl` and
+  `supportUrl`. See `docs/releasing.md` for the full sequence and the portal steps.
+
 ## [0.3.0] - 2026-08-14
 
 ### Fixed
@@ -65,6 +80,7 @@ for what it carried. Its entries are not reconstructed here, because a changelog
 the fact from commit subjects records what was committed rather than what changed for anyone
 using it.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.3.0
 [0.2.1]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.2.1
