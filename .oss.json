@@ -16,6 +16,7 @@
   },
   "milestones": [],
   "release": {
+    "authority": "loop",
     "tag_pattern": "v{version}",
     "merge_method": "squash",
     "commit_subject": null,
