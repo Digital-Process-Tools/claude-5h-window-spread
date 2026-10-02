@@ -1,10 +1,15 @@
 {
-  "presets": ["git", "github"],
+  "presets": ["git", "github", "watch"],
   "ops": {
     "radar": {
       "radar_tiers": {
-        "gh-prs": {}
+        "gh-prs": {
+          "pr_exclude_events": ["checks_pending", "conflicts_appeared"]
+        }
       }
+    },
+    "watch": {
+      "watch_name": "claude-5h-window-spread"
     }
   }
 }
