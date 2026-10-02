@@ -135,6 +135,51 @@ sys.exit(0)
         self.assertIn("claude", result.report())
         self.assertIn("not found", result.report())
 
+    def _fake_claude(self, output: str, code: int) -> str:
+        fake = self.tmp / "fake-claude"
+        fake.write_text(
+            "#!/usr/bin/env python3\nimport sys\n"
+            f"sys.stdout.write({output!r})\nsys.exit({code})\n",
+            encoding="utf-8")
+        fake.chmod(0o755)
+        return str(fake)
+
+    @unittest.skipIf(sys.platform == "win32", "fake claude is a shebang script")
+    def test_reserved_name_as_the_only_error_is_a_warning_20(self):
+        mod = _load(SCRIPT, "smoke_release_tree")
+        out = ("✘ Found 1 error:\n\n  ❯ name: Plugin name \"claude-x\" is reserved: "
+               "it passes as one of Anthropic's own.\n\n✘ Validation failed\n")
+        result = mod.run_smoke(_tree(self.tmp, WORKING_SCRIPT), validate="require",
+                               claude_bin=self._fake_claude(out, 1))
+        self.assertTrue(result.ok, result.report())
+        self.assertIn("::warning::", result.report())
+        self.assertIn("reserved", result.report())
+
+    @unittest.skipIf(sys.platform == "win32", "fake claude is a shebang script")
+    def test_reserved_name_alongside_another_error_still_fails_20(self):
+        mod = _load(SCRIPT, "smoke_release_tree")
+        out = ("✘ Found 2 errors:\n\n  ❯ name: Plugin name \"claude-x\" is reserved.\n"
+               "  ❯ version: invalid\n\n✘ Validation failed\n")
+        result = mod.run_smoke(_tree(self.tmp, WORKING_SCRIPT), validate="require",
+                               claude_bin=self._fake_claude(out, 1))
+        self.assertFalse(result.ok)
+
+    @unittest.skipIf(sys.platform == "win32", "fake claude is a shebang script")
+    def test_any_other_validate_failure_still_fails_20(self):
+        mod = _load(SCRIPT, "smoke_release_tree")
+        out = "✘ Found 1 error:\n\n  ❯ version: invalid\n\n✘ Validation failed\n"
+        result = mod.run_smoke(_tree(self.tmp, WORKING_SCRIPT), validate="require",
+                               claude_bin=self._fake_claude(out, 1))
+        self.assertFalse(result.ok)
+
+    @unittest.skipIf(sys.platform == "win32", "fake claude is a shebang script")
+    def test_validate_passing_passes_20(self):
+        mod = _load(SCRIPT, "smoke_release_tree")
+        result = mod.run_smoke(_tree(self.tmp, WORKING_SCRIPT), validate="require",
+                               claude_bin=self._fake_claude("✔ Validation passed\n", 0))
+        self.assertTrue(result.ok, result.report())
+        self.assertNotIn("::warning::", result.report())
+
     def test_validate_skipped_says_so_out_loud(self):
         mod = _load(SCRIPT, "smoke_release_tree")
         result = mod.run_smoke(_tree(self.tmp, WORKING_SCRIPT), validate="skip")

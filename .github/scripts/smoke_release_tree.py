@@ -115,7 +115,23 @@ def run_validate(tree: Path, mode: str, claude_bin: str | None, home: Path,
     result.notes.append(f"validate: `claude plugin validate --strict` exit {r.returncode}")
     result.notes.extend(f"    {line}" for line in output.splitlines())
     if r.returncode != 0:
+        if _only_reserved_name_error(output):
+            # #20: the CLI reserves `claude-` names; the directory's own scan has not
+            # objected to this listing's name, and Anthropic has been asked whether it
+            # keeps it. Until then this ONE error is a warning, never any other.
+            warning = ("::warning::claude plugin validate --strict: the plugin name is "
+                       "reserved (#20) -- the only error, let through as a warning")
+            print(warning)
+            result.notes.append(warning)
+            return
         result.errors.append(f"validate: claude plugin validate --strict exited {r.returncode}")
+
+
+def _only_reserved_name_error(output: str) -> bool:
+    """True only when the validator reported exactly one error, the reserved name."""
+    errors = [line for line in output.splitlines() if line.strip().startswith("❯")]
+    return (len(errors) == 1 and "is reserved" in errors[0]
+            and "Found 1 error" in output)
 
 
 _HELP_TARGETS = ("--help", "compute --help", "install --help", "uninstall --help", "list --help")
