@@ -9,7 +9,7 @@
 For devs who hit Claude Pro/Max cap daily. Get up to 33% more cap from the same plan. No cloud. No credentials. One install.
 
 ```bash
-/plugin install claude-5h-window-spread@dpt-plugins
+/plugin install 5h-window-spread@dpt-plugins
 /window-spread setup
 ```
 
@@ -89,10 +89,12 @@ Block 1 splits at 11:00 (W1 → W2). Block 2 splits at 16:00 (W2 → W3). Evenin
 
 ```
 /plugin marketplace add Digital-Process-Tools/claude-marketplace
-/plugin install claude-5h-window-spread@dpt-plugins
+/plugin install 5h-window-spread@dpt-plugins
 ```
 
 That's it. Works on macOS, Linux, Windows. Uses local cron — no cloud, no API keys, no auth dance.
+
+Already installed under the old name? Run `/plugin uninstall claude-5h-window-spread@dpt-plugins` then `/plugin install 5h-window-spread@dpt-plugins` — the `claude-` prefix is reserved and the plugin ID changed.
 
 ---
 
