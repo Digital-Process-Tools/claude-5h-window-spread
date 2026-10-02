@@ -4,7 +4,7 @@
 `.oss/`, `.github/`. The Anthropic plugin directory does not accept that tree as-is. Its
 pre-submission checklist holds any version whose plugin folder has more than 512 files,
 or a file of 256 KiB or more that is not an image or font, and it previously scanned
-`main` directly: v0.3.0 (`de8d3e8`, 2026-09-23) came back with two warnings --
+`main` directly: v0.3.0 (`de8d3e8`, committed 2026-08-14) was scanned on 2026-09-23 and came back with two warnings --
 `CLAUDE.md at the plugin root isn't loaded` and `No icon`. `CLAUDE.md` is for
 maintainers and was never meant to ship; the missing icon is a decided gap, out of
 scope here (the listing icon is set once, at the first save, and we chose not to ship
@@ -28,8 +28,10 @@ which hit the same directory holds first.
 ## The sequence
 
 1. **Fold `changelog.d/` into a `## [x.y.z]` section of CHANGELOG.md and bump every
-   version site**: `.claude-plugin/plugin.json` (the list lives in `.oss.json`,
-   `version_sites`).
+   version site**: today that is just `.claude-plugin/plugin.json`. The oss plugin's
+   per-repo config (`.oss.json`, untracked -- see `CLAUDE.md`'s "Maintenance" note)
+   names the full list under `version_sites` when it is present on the machine doing
+   the release.
    *Why:* DPT-marketplace installs follow `main`, and the `version` field in
    `plugin.json` is the only thing that tells them there is something new. The tag does
    not matter to them.

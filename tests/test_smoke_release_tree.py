@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,7 +72,7 @@ def _tree(tmp_path: Path, script_body: str) -> Path:
 class ScriptSmokeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
 
     def test_a_working_script_passes_every_call(self):
         mod = _load(SCRIPT, "smoke_release_tree")

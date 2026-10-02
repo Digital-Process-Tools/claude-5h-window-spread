@@ -15,6 +15,7 @@ catch it.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -76,14 +77,14 @@ def _check(root: Path, **budget):
 class _Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
 
     def _fresh_tmp(self) -> Path:
         """A new empty temp directory, for a subTest loop that calls `_tree`
         more than once -- `_tree` always creates `root / "tree"`, so reusing
         `self.tmp` across iterations collides on the second call."""
         p = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(p)]))
+        self.addCleanup(lambda: shutil.rmtree(p, ignore_errors=True))
         return p
 
 

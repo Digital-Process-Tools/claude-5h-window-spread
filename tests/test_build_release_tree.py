@@ -22,6 +22,7 @@ import importlib.util
 import json
 import os
 import stat
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -179,7 +180,7 @@ def _files(root: Path) -> set:
 class DenyListTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
 
     def test_denied_paths_are_removed_and_everything_else_is_kept(self):
         out = _build(self.tmp, _make_repo(self.tmp))
@@ -250,7 +251,7 @@ class DenyListTest(unittest.TestCase):
 class ChangelogCutTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
 
     def test_changelog_keeps_only_the_latest_released_section(self):
         text = (_build(self.tmp, _make_repo(self.tmp)) / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -289,7 +290,7 @@ class ChangelogCutTest(unittest.TestCase):
 class LinkRewritingTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
 
     def test_readme_links_into_removed_paths_become_absolute(self):
         text = (_build(self.tmp, _make_repo(self.tmp)) / "README.md").read_text(encoding="utf-8")
@@ -345,7 +346,7 @@ class RealRepoTest(unittest.TestCase):
         skill calls and the manifest it needs must survive the build."""
         mod = _load()
         tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
         out = tmp / "out"
         mod.build(REPO_ROOT, "HEAD", out, mod.load_config(CONFIG))
         self.assertTrue((out / "scripts" / "window-spread.py").is_file())
@@ -360,7 +361,7 @@ class RealRepoTest(unittest.TestCase):
 
     def test_cli_builds_and_reports(self):
         tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
         repo = _make_repo(tmp)
         cfg = tmp / "cfg.json"
         cfg.write_text(json.dumps(_config()), encoding="utf-8")
@@ -376,7 +377,7 @@ class RealRepoTest(unittest.TestCase):
 
     def test_cli_fails_loudly_on_an_unknown_ref(self):
         tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(tmp)]))
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
         repo = _make_repo(tmp)
         cfg = tmp / "cfg.json"
         cfg.write_text(json.dumps(_config()), encoding="utf-8")
