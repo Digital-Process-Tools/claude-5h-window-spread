@@ -9,6 +9,16 @@ Entries are assembled from `changelog.d/` fragments at release time — see `.os
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-03
+
+### Changed
+
+- The Anthropic plugin directory now reads this plugin from the slim `release` branch
+  instead of `main`. The plugin itself is unchanged from 0.3.1. The release build lets `claude plugin validate
+  --strict`'s reserved-name error for `claude-5h-window-spread` through as a warning,
+  and only when it is the only error, while Anthropic is asked whether the listing keeps
+  its name (#20).
+
 ## [0.3.1] - 2026-10-02
 
 ### Added
@@ -80,7 +90,8 @@ for what it carried. Its entries are not reconstructed here, because a changelog
 the fact from commit subjects records what was committed rather than what changed for anyone
 using it.
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.3.0
 [0.2.1]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.2.1
