@@ -1,0 +1,27 @@
+{
+  "repo": "Digital-Process-Tools/claude-5h-window-spread",
+  "default_branch": "main",
+  "deny": [
+    "tests/",
+    ".github/",
+    ".claude/",
+    ".oss/",
+    ".githooks/",
+    "changelog.d/",
+    "trap.d/",
+    "outbound/",
+    ".oss.json",
+    ".supertool.json",
+    ".markdownlint.json",
+    ".gitignore",
+    "CLAUDE.md",
+    "CONTRIBUTING.md"
+  ],
+  "changelog": "CHANGELOG.md",
+  "rewrite_links": true,
+  "budget": {
+    "max_file_bytes": 262144,
+    "max_files": 512,
+    "max_total_bytes": 3145728
+  }
+}
