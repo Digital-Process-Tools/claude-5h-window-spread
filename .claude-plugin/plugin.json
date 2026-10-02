@@ -7,6 +7,8 @@
   },
   "license": "Community License",
   "repository": "https://github.com/Digital-Process-Tools/claude-5h-window-spread",
+  "documentationUrl": "https://github.com/Digital-Process-Tools/claude-5h-window-spread#readme",
+  "supportUrl": "https://github.com/Digital-Process-Tools/claude-5h-window-spread/issues",
   "keywords": [
     "claude",
     "claude-code",

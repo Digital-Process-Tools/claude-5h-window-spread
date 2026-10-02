@@ -3,6 +3,7 @@
   "default_branch": "main",
   "deny": [
     "tests/",
+    "docs/",
     ".github/",
     ".claude/",
     ".oss/",
