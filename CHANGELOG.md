@@ -15,7 +15,7 @@ Entries are assembled from `changelog.d/` fragments at release time — see `.os
 
 - Added a slim `release` branch for the Anthropic plugin directory (#12). A tag push
   now builds a tree that keeps only what the plugin runs -- `README.md`, `LICENSE`,
-  `CODE_OF_CONDUCT.md`, `SECURITY.md`, `banner.png`, `.claude-plugin/plugin.json`,
+  `CODE_OF_CONDUCT.md`, `SECURITY.md`, banner.png, `.claude-plugin/plugin.json`,
   `scripts/window-spread.py` and `skills/window-spread/SKILL.md`, cutting CHANGELOG.md
   to its latest release and rewriting any link into a removed path -- checks it
   against the directory's pre-submission checklist and a side-effect-free smoke test
