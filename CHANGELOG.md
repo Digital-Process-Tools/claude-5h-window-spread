@@ -9,19 +9,14 @@ Entries are assembled from `changelog.d/` fragments at release time — see `.os
 
 This file carries only the latest release. The full history is in [CHANGELOG.md on the default branch](https://github.com/Digital-Process-Tools/claude-5h-window-spread/blob/main/CHANGELOG.md).
 
-## [0.3.1] - 2026-10-02
+## [0.3.2] - 2026-10-03
 
-### Added
+### Changed
 
-- Added a slim `release` branch for the Anthropic plugin directory (#12). A tag push
-  now builds a tree that keeps only what the plugin runs -- `README.md`, `LICENSE`,
-  `CODE_OF_CONDUCT.md`, `SECURITY.md`, banner.png, `.claude-plugin/plugin.json`,
-  `scripts/window-spread.py` and `skills/window-spread/SKILL.md`, cutting CHANGELOG.md
-  to its latest release and rewriting any link into a removed path -- checks it
-  against the directory's pre-submission checklist and a side-effect-free smoke test
-  (`claude plugin validate --strict` plus `window-spread.py --help`/`compute`, never
-  `install`/`uninstall`/`list`), and pushes it as one commit on `release` only if every
-  step passes. `.claude-plugin/plugin.json` now also carries `documentationUrl` and
-  `supportUrl`. See `docs/releasing.md` for the full sequence and the portal steps.
+- The Anthropic plugin directory now reads this plugin from the slim `release` branch
+  instead of `main`. The plugin itself is unchanged from 0.3.1. The release build lets `claude plugin validate
+  --strict`'s reserved-name error for `claude-5h-window-spread` through as a warning,
+  and only when it is the only error, while Anthropic is asked whether the listing keeps
+  its name (#20).
 
-[0.3.1]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.3.1
+[0.3.2]: https://github.com/Digital-Process-Tools/claude-5h-window-spread/releases/tag/v0.3.2
