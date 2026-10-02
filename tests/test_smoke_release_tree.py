@@ -16,7 +16,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
