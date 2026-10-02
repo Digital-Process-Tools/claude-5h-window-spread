@@ -15,9 +15,6 @@
     "lanes": []
   },
   "milestones": [],
-  "ci": {
-    "required_checks": 4
-  },
   "release": {
     "tag_pattern": "v{version}",
     "merge_method": "squash",
